@@ -2,14 +2,21 @@
 #![no_main]
 #![feature(abi_x86_interrupt)]
 
+extern crate alloc;
+
 mod vga_buffer;
 mod gdt;
 mod idt;
 mod io;
 mod pic;
 mod keyboard;
+mod memory;
+mod allocator;
 mod shell;
 
+use alloc::boxed::Box;
+use alloc::format;
+use alloc::vec::Vec;
 use core::panic::PanicInfo;
 
 /// Entry point of the AuraOS kernel.
@@ -34,13 +41,29 @@ pub extern "C" fn _start() -> ! {
     // Step 3: Initialize the Interrupt Descriptor Table (IDT)
     idt::init();
 
-    // Step 4: Enable hardware interrupts at the CPU level
+    // Step 4: Initialize the 512 KiB Dynamic Heap Allocator
+    allocator::init_heap();
+
+    // Step 5: Verify dynamic allocations (Box, Vec, String)
+    {
+        let heap_val = Box::new(42u64);
+        let mut test_vec = Vec::new();
+        for i in 0..5 {
+            test_vec.push(i * 10);
+        }
+        let test_str = format!("AuraOS Dynamic String (Vec len = {})", test_vec.len());
+        println!("[OK] Allocator : Box({}), Vec({:?}), String ready.", *heap_val, &test_vec[..3]);
+        println!("                 {}", test_str);
+    }
+
+    // Step 6: Enable hardware interrupts at the CPU level
     unsafe { core::arch::asm!("sti", options(nomem, nostack)) };
     println!("[OK] CPU       : Hardware interrupts enabled (sti).");
 
-    // Step 5: System status report
+    // Step 7: System status report
     println!();
     println!("[OK] Mode      : x86_64 Bare-Metal Long Mode (64-bit)");
+    println!("[OK] Memory    : 512 KiB Heap, 4 KiB Paging abstractions");
     println!("[OK] Video     : VGA 80x25 text mode with auto-scrolling");
     println!("[OK] Keyboard  : PS/2 driver active (direct typing)");
     println!();

@@ -69,6 +69,7 @@ impl Shell {
                 crate::println!("  help        - Display this help message");
                 crate::println!("  clear       - Clear the VGA screen");
                 crate::println!("  info        - Display system and CPU status");
+                crate::println!("  mem         - Display physical/virtual memory & heap usage");
                 crate::println!("  ticks       - Display system timer ticks (PIT IRQ0)");
                 crate::println!("  manifesto   - AuraOS 10-year roadmap & architecture vision");
                 crate::println!("  calc <a+b>  - Evaluate a simple addition");
@@ -81,17 +82,34 @@ impl Shell {
             }
 
             "info" => {
+                let cr3 = crate::memory::read_cr3();
                 crate::println!("============================================================");
                 crate::println!("                    AURA OPERATING SYSTEM                   ");
                 crate::println!("============================================================");
                 crate::println!("  Version        : v0.1.0 (Bare-Metal Prototype)");
                 crate::println!("  Architecture   : x86_64 Long Mode (64-bit pure Rust)");
+                crate::println!("  Memory Model   : 4-Level Paging (PML4 at {:#x})", cr3.as_u64());
+                crate::println!("  Heap Allocator : 512 KiB Linked List Allocator (Dynamic)");
                 crate::println!("  Video Driver   : VGA Text Mode 80x25 (Buffer 0xb8000)");
                 crate::println!("  IRQ Controller : Dual 8259 PIC remapped (32..47)");
                 crate::println!("  Protection     : 64-bit GDT + 256-entry IDT");
                 crate::println!("  Keyboard       : PS/2 Driver (Set 1 Make/Break)");
                 crate::println!("  Timer Ticks    : {}", crate::idt::ticks());
                 crate::println!("============================================================");
+            }
+
+            "mem" => {
+                let free = crate::allocator::free_memory();
+                let used = crate::allocator::used_memory();
+                let cr3 = crate::memory::read_cr3();
+                crate::println!("--- AURAOS MEMORY SUBSYSTEM ---");
+                crate::println!("  Paging Model : x86_64 4-Level Paging (4 KiB pages)");
+                crate::println!("  Active PML4  : CR3 base = {:#x}", cr3.as_u64());
+                crate::println!("  Heap Strategy: Linked List Allocator (Coalescing)");
+                crate::println!("  Heap Total   : {} KiB ({} bytes)", crate::allocator::HEAP_SIZE / 1024, crate::allocator::HEAP_SIZE);
+                crate::println!("  Heap Used    : {} bytes", used);
+                crate::println!("  Heap Free    : {} bytes ({} KiB)", free, free / 1024);
+                crate::println!("-------------------------------");
             }
 
             "ticks" => {
