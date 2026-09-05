@@ -129,6 +129,6 @@ cd aura_kernel
 
 ## 📜 6. Auteurs & Licence
 
-* **Architecte & Créateur :** Niaina (avec l'assistance IA Antigravity)
+* **Architecte & Créateur :** Niaina
 * **Licence :** Open-Source sous licence MIT / Apache 2.0 (Double Licence Rust standard).
 
