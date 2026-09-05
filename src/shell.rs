@@ -80,6 +80,7 @@ impl Shell {
                 crate::println!("  manifesto   - AuraOS 10-year roadmap & architecture vision");
                 crate::println!("  calc <a+b>  - Evaluate a simple addition");
                 crate::println!("  reboot      - Reset and restart the computer");
+                crate::println!("  shutdown    - Power off the system / virtual machine");
                 crate::println!("  halt        - Put the CPU into deep sleep");
             }
 
@@ -224,6 +225,25 @@ impl Shell {
                 unsafe {
                     // Pulse reset line via 8042 keyboard controller (port 0x64, command 0xFE)
                     outb(0x64, 0xFE);
+                }
+            }
+
+            "shutdown" | "poweroff" => {
+                crate::println!("Powering off system via ACPI...");
+                unsafe {
+                    // Modern QEMU ACPI poweroff
+                    crate::io::outw(0x604, 0x2000);
+                    // Legacy Bochs / older QEMU
+                    crate::io::outw(0xB004, 0x2000);
+                    // VirtualBox ACPI shutdown
+                    crate::io::outw(0x4004, 0x3400);
+                    // Cloud Hypervisor
+                    crate::io::outw(0x600, 0x34);
+
+                    crate::println!("ACPI poweroff triggered. Halting CPU.");
+                    loop {
+                        core::arch::asm!("cli; hlt", options(nomem, nostack, preserves_flags));
+                    }
                 }
             }
 

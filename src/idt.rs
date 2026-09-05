@@ -151,6 +151,7 @@ static TICKS: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new
 /// IRQ 0: System Timer (8254 PIT).
 extern "x86-interrupt" fn timer_handler(_frame: InterruptStackFrame) {
     TICKS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+    crate::task::timer_tick();
     crate::pic::send_eoi(crate::pic::IRQ_TIMER);
 }
 

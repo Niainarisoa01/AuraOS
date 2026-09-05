@@ -245,3 +245,13 @@ pub fn yield_now() {
         switch_context(old_rsp_ptr, new_rsp);
     }
 }
+
+/// Called on every hardware timer PIT tick (IRQ0) to update CPU accounting.
+pub fn timer_tick() {
+    let mut sched = SCHEDULER.lock();
+    if !sched.tasks.is_empty() {
+        let curr = sched.current;
+        sched.tasks[curr].ticks += 1;
+    }
+}
+
