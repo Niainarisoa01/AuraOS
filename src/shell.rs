@@ -69,6 +69,8 @@ impl Shell {
                 crate::println!("  help        - Display this help message");
                 crate::println!("  clear       - Clear the VGA screen");
                 crate::println!("  info        - Display system and CPU status");
+                crate::println!("  cpu         - Display detailed CPUID processor features");
+                crate::println!("  time / date - Display hardware RTC calendar date & time");
                 crate::println!("  mem         - Display physical/virtual memory & heap usage");
                 crate::println!("  serial <msg>- Send a message to the COM1 serial port");
                 crate::println!("  ticks       - Display system timer ticks (PIT IRQ0)");
@@ -84,11 +86,15 @@ impl Shell {
 
             "info" => {
                 let cr3 = crate::memory::read_cr3();
+                let cpu = crate::cpuid::get_cpu_info();
+                let rtc = crate::cmos::read_rtc();
                 crate::println!("============================================================");
                 crate::println!("                    AURA OPERATING SYSTEM                   ");
                 crate::println!("============================================================");
                 crate::println!("  Version        : v0.1.0 (Bare-Metal Prototype)");
                 crate::println!("  Architecture   : x86_64 Long Mode (64-bit pure Rust)");
+                crate::println!("  Processor      : {} ({})", cpu.brand_str(), cpu.vendor_str());
+                crate::println!("  RTC Clock      : {:04}-{:02}-{:02} {:02}:{:02}:{:02} UTC", rtc.year, rtc.month, rtc.day, rtc.hour, rtc.minute, rtc.second);
                 crate::println!("  Memory Model   : 4-Level Paging (PML4 at {:#x})", cr3.as_u64());
                 crate::println!("  Heap Allocator : 512 KiB Linked List Allocator (Dynamic)");
                 crate::println!("  Serial Port    : COM1 (UART 16550 at 0x3F8, 115200 baud)");
@@ -98,6 +104,30 @@ impl Shell {
                 crate::println!("  Keyboard       : PS/2 Driver (Set 1 Make/Break)");
                 crate::println!("  Timer Ticks    : {}", crate::idt::ticks());
                 crate::println!("============================================================");
+            }
+
+            "cpu" => {
+                let cpu = crate::cpuid::get_cpu_info();
+                let cycles = crate::cpuid::rdtsc();
+                crate::println!("--- AURAOS CPUID HARDWARE REPORT ---");
+                crate::println!("  Brand String   : {}", cpu.brand_str());
+                crate::println!("  Vendor ID      : {}", cpu.vendor_str());
+                crate::println!("  TSC Cycles     : {}", cycles);
+                crate::println!("  Feature Flags  :");
+                crate::println!("    * FPU        : {}", if cpu.has_fpu { "Supported" } else { "No" });
+                crate::println!("    * TSC        : {}", if cpu.has_tsc { "Supported" } else { "No" });
+                crate::println!("    * APIC       : {}", if cpu.has_apic { "Supported" } else { "No" });
+                crate::println!("    * SSE / SSE2 : {}", if cpu.has_sse && cpu.has_sse2 { "Supported" } else { "No" });
+                crate::println!("    * SSE3       : {}", if cpu.has_sse3 { "Supported" } else { "No" });
+                crate::println!("    * AVX        : {}", if cpu.has_avx { "Supported" } else { "No" });
+                crate::println!("    * RDRAND     : {}", if cpu.has_rdrand { "Supported" } else { "No" });
+                crate::println!("------------------------------------");
+            }
+
+            "time" | "date" => {
+                let rtc = crate::cmos::read_rtc();
+                crate::println!("Hardware RTC Clock: {:04}-{:02}-{:02} {:02}:{:02}:{:02} UTC",
+                    rtc.year, rtc.month, rtc.day, rtc.hour, rtc.minute, rtc.second);
             }
 
             "mem" => {

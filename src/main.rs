@@ -13,6 +13,8 @@ mod keyboard;
 mod memory;
 mod allocator;
 mod serial;
+mod cmos;
+mod cpuid;
 mod shell;
 
 use alloc::boxed::Box;
@@ -68,12 +70,20 @@ pub extern "C" fn _start() -> ! {
         serial_println!("[OK] Dynamic allocations verified: Box, Vec, String.");
     }
 
-    // Step 6: Enable hardware interrupts at the CPU level
+    // Step 6: CPU and Hardware Clock Detection
+    let cpu = cpuid::get_cpu_info();
+    let rtc = cmos::read_rtc();
+    println!("[OK] Processor : {} ({})", cpu.brand_str(), cpu.vendor_str());
+    println!("[OK] RTC Clock : {:04}-{:02}-{:02} {:02}:{:02}:{:02} UTC", rtc.year, rtc.month, rtc.day, rtc.hour, rtc.minute, rtc.second);
+    serial_println!("[OK] Processor: {} ({})", cpu.brand_str(), cpu.vendor_str());
+    serial_println!("[OK] RTC Clock: {:04}-{:02}-{:02} {:02}:{:02}:{:02} UTC", rtc.year, rtc.month, rtc.day, rtc.hour, rtc.minute, rtc.second);
+
+    // Step 7: Enable hardware interrupts at the CPU level
     unsafe { core::arch::asm!("sti", options(nomem, nostack)) };
     println!("[OK] CPU       : Hardware interrupts enabled (sti).");
     serial_println!("[OK] Interrupts enabled (sti).");
 
-    // Step 7: System status report
+    // Step 8: System status report
     println!();
     println!("[OK] Mode      : x86_64 Bare-Metal Long Mode (64-bit)");
     println!("[OK] Memory    : 512 KiB Heap, 4 KiB Paging abstractions");

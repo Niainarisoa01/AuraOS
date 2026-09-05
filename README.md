@@ -83,31 +83,38 @@ Consultez le document complet du cahier des charges : [OS_MANIFESTE_ET_OBJECTIFS
 
 ---
 
-## 🛠️ 5. État Actuel & Compilation
+## 🛠️ 5. État Actuel du Noyau & Fonctionnalités Implémentées
 
-Le projet se compose actuellement du cœur du noyau [`aura_kernel`](./aura_kernel) :
+Le noyau [`aura_kernel`](./aura_kernel) est un système d'exploitation x86_64 Long Mode 100% Rust bare-metal :
 * **Version :** `v0.1.0-alpha`
-* **Mode :** Bare-Metal (`#![no_std]`, `#![no_main]`)
-* **Sortie vidéo :** Buffer VGA texte à l'adresse `0xb8000`
+* **Mode :** Bare-Metal (`#![no_std]`, `#![no_main]`, x86_64 Long Mode 64-bit)
+* **Image Disque Amorçable :** `118 Ko` (`bootimage-aura-kernel.bin`)
+* **Sortie Vidéo :** Buffer VGA texte 80x25 (`0xb8000`), avec défilement fluide, couleurs HSL et atomic spinlocks
+* **Série & Débogage :** Pilote UART 16550 COM1 (`0x3F8` à 115200 baud, 8N1) avec macros `serial_print!` / `serial_println!`
+* **Architecture CPU :** GDT 64-bit Ring 0, IDT avec gestion des exceptions processeur (Div/0, Double Fault, Page Fault, GPF...)
+* **Contrôleur d'Interruptions :** Double PIC 8259 avec remappage IRQ 32..47
+* **Périphériques d'Entrée & Horloges :**
+  * Clavier PS/2 (IRQ1) avec décodage des scancodes et touches de modification
+  * Horloge Système PIT (IRQ0, 100 Hz)
+  * Horloge Temps Réel CMOS (RTC ports `0x70`/`0x71`) avec décodage BCD/binaire
+  * Détection Matérielle CPUID (Vendor string, Brand name, flags SSE/AVX/APIC/RDRAND) et compteur de cycles `RDTSC`
+* **Gestionnaire de Mémoire :**
+  * Pagination x86_64 à 4 niveaux (`CR3`, tables PML4, PDPT, PD, PT)
+  * Allocateur de mémoire de tas (Heap Allocator) de 512 Ko à liste chaînée avec fusion de blocs libres (*free coalescing*)
+  * Support complet d'`extern crate alloc` (`Box`, `Vec`, `String`, `format!`)
+* **Shell Interactif AuraOS :**
+  * Commandes disponibles : `help`, `info`, `cpu`, `time`, `date`, `mem`, `serial <msg>`, `ticks`, `calc <a+b>`, `clear`, `manifesto`, `reboot`, `halt`
 
-### Prérequis
-* Le compilateur Rust avec la cible Bare-Metal :
-  ```bash
-  rustup target add x86_64-unknown-none
-  ```
-
-### Compiler le noyau
+### Lancer AuraOS dans QEMU
 ```bash
 cd aura_kernel
-cargo build --release
+./run_qemu.sh
 ```
-
-Le binaire exécutable sera généré dans :
-`aura_kernel/target/x86_64-unknown-none/release/aura_kernel`
 
 ---
 
 ## 📜 6. Auteurs & Licence
 
-* **Architecte & Créateur :** Niaina & Antigravity (IA Pair Programmer)
+* **Architecte & Créateur :** Niaina (avec l'assistance IA Antigravity)
 * **Licence :** Open-Source sous licence MIT / Apache 2.0 (Double Licence Rust standard).
+
