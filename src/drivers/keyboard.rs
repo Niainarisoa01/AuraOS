@@ -9,7 +9,7 @@
 /// When a key is released: A "Break Code" (Make Code | 0x80) is sent.
 
 use core::sync::atomic::{AtomicBool, Ordering};
-use crate::io::inb;
+use crate::arch::io::inb;
 
 const KEYBOARD_DATA_PORT: u16 = 0x60;
 

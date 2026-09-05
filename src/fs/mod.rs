@@ -1,5 +1,5 @@
 /// ============================================================================
-/// Virtual File System (VFS) & In-Memory RAM Disk (RAMFS)
+/// AuraOS Virtual File System (VFS) & In-Memory RAM Disk (RAMFS)
 /// ============================================================================
 ///
 /// Implements an Inode-based hierarchical Virtual File System in pure Rust.
@@ -8,7 +8,7 @@
 
 use alloc::string::String;
 use alloc::vec::Vec;
-use crate::vga_buffer::Spinlock;
+use crate::sync::Spinlock;
 
 #[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

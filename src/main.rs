@@ -4,23 +4,17 @@
 
 extern crate alloc;
 
-mod vga_buffer;
-mod gdt;
-mod idt;
-mod io;
-mod pic;
-mod keyboard;
+// Core concurrency primitive
+mod sync;
+
+// Subsystem architecture layers
+mod arch;
+mod drivers;
 mod memory;
-mod allocator;
-mod serial;
-mod cmos;
-mod cpuid;
-mod pci;
 mod task;
-mod vfs;
-mod ata;
-mod selftest;
+mod fs;
 mod shell;
+mod tests;
 
 use alloc::boxed::Box;
 use alloc::format;
@@ -32,7 +26,7 @@ use core::panic::PanicInfo;
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() -> ! {
     // Step 0: Initialize COM1 serial port for immediate debug logging
-    serial::init();
+    drivers::serial::init();
     serial_println!("============================================================");
     serial_println!("        AuraOS Kernel v0.1.0 - Booting Up...                ");
     serial_println!("============================================================");
@@ -46,20 +40,20 @@ pub extern "C" fn _start() -> ! {
     println!();
 
     // Step 1: Initialize the Global Descriptor Table (GDT)
-    gdt::init();
+    arch::gdt::init();
     println!("[OK] GDT       : Global Descriptor Table loaded.");
     serial_println!("[OK] GDT loaded.");
 
     // Step 2: Initialize and remap the dual 8259 PIC controllers
-    pic::init();
+    arch::pic::init();
     serial_println!("[OK] PIC remapped.");
 
     // Step 3: Initialize the Interrupt Descriptor Table (IDT)
-    idt::init();
+    arch::idt::init();
     serial_println!("[OK] IDT loaded.");
 
     // Step 4: Initialize the 512 KiB Dynamic Heap Allocator
-    allocator::init_heap();
+    memory::allocator::init_heap();
     serial_println!("[OK] 512 KiB Heap initialized.");
 
     // Step 5: Verify dynamic allocations (Box, Vec, String)
@@ -76,15 +70,15 @@ pub extern "C" fn _start() -> ! {
     }
 
     // Step 6: CPU and Hardware Clock Detection
-    let cpu = cpuid::get_cpu_info();
-    let rtc = cmos::read_rtc();
+    let cpu = arch::cpuid::get_cpu_info();
+    let rtc = drivers::cmos::read_rtc();
     println!("[OK] Processor : {} ({})", cpu.brand_str(), cpu.vendor_str());
     println!("[OK] RTC Clock : {:04}-{:02}-{:02} {:02}:{:02}:{:02} UTC", rtc.year, rtc.month, rtc.day, rtc.hour, rtc.minute, rtc.second);
     serial_println!("[OK] Processor: {} ({})", cpu.brand_str(), cpu.vendor_str());
     serial_println!("[OK] RTC Clock: {:04}-{:02}-{:02} {:02}:{:02}:{:02} UTC", rtc.year, rtc.month, rtc.day, rtc.hour, rtc.minute, rtc.second);
 
     // Step 7: PCI Hardware Bus Enumeration
-    let pci_devices = pci::scan_pci_bus();
+    let pci_devices = drivers::pci::scan_pci_bus();
     println!("[OK] PCI Bus   : Discovered {} active hardware device(s).", pci_devices.len());
     serial_println!("[OK] PCI Bus: {} active device(s) enumerated.", pci_devices.len());
     for dev in &pci_devices {
@@ -99,7 +93,7 @@ pub extern "C" fn _start() -> ! {
     serial_println!("[OK] Multitasking initialized.");
 
     // Step 9: Initialize Virtual File System & RAMFS
-    vfs::init();
+    fs::init();
     println!("[OK] VFS       : Root RAM disk mounted at '/' (hierarchy ready).");
     serial_println!("[OK] VFS & RAMFS mounted.");
 
@@ -111,7 +105,7 @@ pub extern "C" fn _start() -> ! {
     // Step 11: Execute Kernel Automated Subsystem Diagnostics
     println!();
     println!("[DIAG] Running AuraOS automated self-test verification...");
-    let test_results = selftest::run_all_tests();
+    let test_results = tests::run_all_tests();
     let mut all_passed = true;
     for res in &test_results {
         if res.passed {

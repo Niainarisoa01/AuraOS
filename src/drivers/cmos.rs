@@ -9,7 +9,7 @@
 ///   - 0x70: CMOS Index / Address Register (Selects RTC register to read/write)
 ///   - 0x71: CMOS Data Register
 
-use crate::io::{inb, outb};
+use crate::arch::io::{inb, outb};
 
 const CMOS_INDEX: u16 = 0x70;
 const CMOS_DATA: u16 = 0x71;

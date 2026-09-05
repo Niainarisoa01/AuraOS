@@ -103,4 +103,3 @@ pub unsafe fn io_wait() {
         outb(0x80, 0);
     }
 }
-

@@ -7,7 +7,7 @@
 ///
 /// Standard Sector Size: 512 bytes.
 
-use crate::io::{inb, inw, io_wait, outb, outw};
+use crate::arch::io::{inb, inw, io_wait, outb, outw};
 
 const ATA_DATA_PORT: u16 = 0x1F0;
 const ATA_SECTOR_COUNT: u16 = 0x1F2;

@@ -13,7 +13,7 @@ use alloc::boxed::Box;
 use alloc::vec;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicUsize, Ordering};
-use crate::vga_buffer::Spinlock;
+use crate::sync::Spinlock;
 
 const STACK_SIZE: usize = 16 * 1024; // 16 KiB per kernel thread stack
 
@@ -254,4 +254,3 @@ pub fn timer_tick() {
         sched.tasks[curr].ticks += 1;
     }
 }
-

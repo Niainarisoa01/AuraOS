@@ -1,5 +1,5 @@
 /// ============================================================================
-/// Kernel Self-Test & Automated Verification Engine
+/// AuraOS Automated Kernel Verification & Self-Test Suite
 /// ============================================================================
 ///
 /// Runs automated internal diagnostics on all kernel subsystems:
@@ -9,7 +9,7 @@
 /// 4. CMOS Real-Time Clock calendar range validation
 /// 5. CPUID instruction decoding & cycle timing
 /// 6. Task Scheduler & Stack Alignment verification
-/// 7. COM1 Serial UART logging channel
+/// 7. Dynamic String Formatting & Vector Growth
 
 use alloc::boxed::Box;
 use alloc::format;
@@ -30,7 +30,7 @@ pub fn run_all_tests() -> Vec<TestResult> {
     // Test 1: Virtual Memory & 4-Level Paging Calculations
     // ------------------------------------------------------------------------
     {
-        use crate::memory::VirtAddr;
+        use crate::memory::paging::VirtAddr;
         let addr = VirtAddr(0x0000_7FFF_FFFF_F000);
         let p4 = addr.p4_index();
         let p3 = addr.p3_index();
@@ -49,7 +49,7 @@ pub fn run_all_tests() -> Vec<TestResult> {
     // Test 2: Dynamic Heap Allocator & Zero-Leak Coalescing
     // ------------------------------------------------------------------------
     {
-        let initial_used = crate::allocator::used_memory();
+        let initial_used = crate::memory::allocator::used_memory();
         let mut boxes = Vec::new();
 
         // Allocate 50 dynamic objects
@@ -57,7 +57,7 @@ pub fn run_all_tests() -> Vec<TestResult> {
             boxes.push(Box::new(i * 100));
         }
 
-        let mid_used = crate::allocator::used_memory();
+        let mid_used = crate::memory::allocator::used_memory();
         let allocated_ok = mid_used > initial_used;
 
         // Verify values
@@ -71,7 +71,7 @@ pub fn run_all_tests() -> Vec<TestResult> {
 
         // Drop all boxes to test deallocation and coalescing
         drop(boxes);
-        let final_used = crate::allocator::used_memory();
+        let final_used = crate::memory::allocator::used_memory();
         let freed_ok = final_used == initial_used;
 
         let passed = allocated_ok && values_ok && freed_ok;
@@ -86,7 +86,7 @@ pub fn run_all_tests() -> Vec<TestResult> {
     // Test 3: VFS / RAMFS Inode Creation, Read, Write & Deletion
     // ------------------------------------------------------------------------
     {
-        let mut vfs = crate::vfs::VFS.lock();
+        let mut vfs = crate::fs::VFS.lock();
         let test_name = "test_verification.tmp";
         let test_data = b"AuraOS Subsystem Self-Test: 100% Functional";
 
@@ -125,7 +125,7 @@ pub fn run_all_tests() -> Vec<TestResult> {
     // Test 4: CMOS Real-Time Clock Range Sanity
     // ------------------------------------------------------------------------
     {
-        let rtc = crate::cmos::read_rtc();
+        let rtc = crate::drivers::cmos::read_rtc();
         let valid_year = rtc.year >= 2026;
         let valid_month = rtc.month >= 1 && rtc.month <= 12;
         let valid_day = rtc.day >= 1 && rtc.day <= 31;
@@ -146,9 +146,9 @@ pub fn run_all_tests() -> Vec<TestResult> {
     // Test 5: CPUID Hardware Detection & Cycle Timing
     // ------------------------------------------------------------------------
     {
-        let cpu = crate::cpuid::get_cpu_info();
-        let cycles_before = crate::cpuid::rdtsc();
-        let cycles_after = crate::cpuid::rdtsc();
+        let cpu = crate::arch::cpuid::get_cpu_info();
+        let cycles_before = crate::arch::cpuid::rdtsc();
+        let cycles_after = crate::arch::cpuid::rdtsc();
 
         let vendor = cpu.vendor_str();
         let valid_vendor = !vendor.is_empty() && vendor != "Unknown";

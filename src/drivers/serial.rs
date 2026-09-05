@@ -10,8 +10,8 @@
 /// via `-serial stdio` or logged to a file.
 
 use core::fmt;
-use crate::io::{inb, outb};
-use crate::vga_buffer::Spinlock;
+use crate::arch::io::{inb, outb};
+use crate::sync::Spinlock;
 
 /// Standard I/O port address for COM1.
 pub const COM1_BASE: u16 = 0x3F8;
@@ -119,7 +119,7 @@ pub fn init() {
 
 #[macro_export]
 macro_rules! serial_print {
-    ($($arg:tt)*) => ($crate::serial::_print(format_args!($($arg)*)));
+    ($($arg:tt)*) => ($crate::drivers::serial::_print(format_args!($($arg)*)));
 }
 
 #[macro_export]

@@ -5,8 +5,9 @@
 /// Manages the line input buffer and parses/executes user commands
 /// entered via the PS/2 keyboard.
 
-use crate::vga_buffer::clear_screen;
-use crate::io::outb;
+use crate::drivers::vga::clear_screen;
+use crate::arch::io::outb;
+use crate::sync::Spinlock;
 
 const BUFFER_MAX: usize = 128;
 
@@ -36,7 +37,7 @@ impl Shell {
     pub fn backspace(&mut self) {
         if self.length > 0 {
             self.length -= 1;
-            crate::vga_buffer::backspace();
+            crate::drivers::vga::backspace();
         }
     }
 
@@ -98,9 +99,9 @@ impl Shell {
             }
 
             "info" => {
-                let cr3 = crate::memory::read_cr3();
-                let cpu = crate::cpuid::get_cpu_info();
-                let rtc = crate::cmos::read_rtc();
+                let cr3 = crate::memory::paging::read_cr3();
+                let cpu = crate::arch::cpuid::get_cpu_info();
+                let rtc = crate::drivers::cmos::read_rtc();
                 crate::println!("============================================================");
                 crate::println!("                    AURA OPERATING SYSTEM                   ");
                 crate::println!("============================================================");
@@ -115,13 +116,13 @@ impl Shell {
                 crate::println!("  IRQ Controller : Dual 8259 PIC remapped (32..47)");
                 crate::println!("  Protection     : 64-bit GDT + 256-entry IDT");
                 crate::println!("  Keyboard       : PS/2 Driver (Set 1 Make/Break)");
-                crate::println!("  Timer Ticks    : {}", crate::idt::ticks());
+                crate::println!("  Timer Ticks    : {}", crate::arch::idt::ticks());
                 crate::println!("============================================================");
             }
 
             "cpu" => {
-                let cpu = crate::cpuid::get_cpu_info();
-                let cycles = crate::cpuid::rdtsc();
+                let cpu = crate::arch::cpuid::get_cpu_info();
+                let cycles = crate::arch::cpuid::rdtsc();
                 crate::println!("--- AURAOS CPUID HARDWARE REPORT ---");
                 crate::println!("  Brand String   : {}", cpu.brand_str());
                 crate::println!("  Vendor ID      : {}", cpu.vendor_str());
@@ -138,7 +139,7 @@ impl Shell {
             }
 
             "pci" | "lspci" => {
-                let devices = crate::pci::scan_pci_bus();
+                let devices = crate::drivers::pci::scan_pci_bus();
                 crate::println!("--- DISCOVERED PCI BUS DEVICES ({}) ---", devices.len());
                 if devices.is_empty() {
                     crate::println!("  No PCI devices found on scanned buses.");
@@ -172,20 +173,20 @@ impl Shell {
             }
 
             "time" | "date" => {
-                let rtc = crate::cmos::read_rtc();
+                let rtc = crate::drivers::cmos::read_rtc();
                 crate::println!("Hardware RTC Clock: {:04}-{:02}-{:02} {:02}:{:02}:{:02} UTC",
                     rtc.year, rtc.month, rtc.day, rtc.hour, rtc.minute, rtc.second);
             }
 
             "mem" => {
-                let free = crate::allocator::free_memory();
-                let used = crate::allocator::used_memory();
-                let cr3 = crate::memory::read_cr3();
+                let free = crate::memory::allocator::free_memory();
+                let used = crate::memory::allocator::used_memory();
+                let cr3 = crate::memory::paging::read_cr3();
                 crate::println!("--- AURAOS MEMORY SUBSYSTEM ---");
                 crate::println!("  Paging Model : x86_64 4-Level Paging (4 KiB pages)");
                 crate::println!("  Active PML4  : CR3 base = {:#x}", cr3.as_u64());
                 crate::println!("  Heap Strategy: Linked List Allocator (Coalescing)");
-                crate::println!("  Heap Total   : {} KiB ({} bytes)", crate::allocator::HEAP_SIZE / 1024, crate::allocator::HEAP_SIZE);
+                crate::println!("  Heap Total   : {} KiB ({} bytes)", crate::memory::allocator::HEAP_SIZE / 1024, crate::memory::allocator::HEAP_SIZE);
                 crate::println!("  Heap Used    : {} bytes", used);
                 crate::println!("  Heap Free    : {} bytes ({} KiB)", free, free / 1024);
                 crate::println!("-------------------------------");
@@ -202,7 +203,7 @@ impl Shell {
             }
 
             "ticks" => {
-                crate::println!("System timer (IRQ0): {} ticks", crate::idt::ticks());
+                crate::println!("System timer (IRQ0): {} ticks", crate::arch::idt::ticks());
             }
 
             "manifesto" | "manifeste" => {
@@ -230,14 +231,14 @@ impl Shell {
             }
 
             "pwd" => {
-                let vfs = crate::vfs::VFS.lock();
+                let vfs = crate::fs::VFS.lock();
                 let path = vfs.get_path(vfs.current_inode);
                 crate::println!("{}", path);
             }
 
             "cd" => {
                 let target = parts.next().unwrap_or("/");
-                let mut vfs = crate::vfs::VFS.lock();
+                let mut vfs = crate::fs::VFS.lock();
                 match vfs.resolve_path(target) {
                     Ok(node_id) => {
                         if vfs.inodes[node_id].is_dir() {
@@ -252,7 +253,7 @@ impl Shell {
 
             "ls" => {
                 let target = parts.next().unwrap_or("");
-                let vfs = crate::vfs::VFS.lock();
+                let vfs = crate::fs::VFS.lock();
                 let dir_id = if target.is_empty() {
                     vfs.current_inode
                 } else {
@@ -284,7 +285,7 @@ impl Shell {
                 if path.is_empty() {
                     crate::println!("Usage: cat <file_path>");
                 } else {
-                    let vfs = crate::vfs::VFS.lock();
+                    let vfs = crate::fs::VFS.lock();
                     match vfs.resolve_path(path) {
                         Ok(file_id) => match vfs.read_file(file_id) {
                             Ok(bytes) => {
@@ -306,7 +307,7 @@ impl Shell {
                 if file_name.is_empty() {
                     crate::println!("Usage: touch <file_name>");
                 } else {
-                    let mut vfs = crate::vfs::VFS.lock();
+                    let mut vfs = crate::fs::VFS.lock();
                     let curr = vfs.current_inode;
                     match vfs.create_file_at(curr, file_name, b"") {
                         Ok(_) => crate::println!("File created: {}", file_name),
@@ -320,7 +321,7 @@ impl Shell {
                 if dir_name.is_empty() {
                     crate::println!("Usage: mkdir <directory_name>");
                 } else {
-                    let mut vfs = crate::vfs::VFS.lock();
+                    let mut vfs = crate::fs::VFS.lock();
                     let curr = vfs.current_inode;
                     match vfs.mkdir_at(curr, dir_name) {
                         Ok(_) => crate::println!("Directory created: {}", dir_name),
@@ -335,7 +336,7 @@ impl Shell {
                     if let Some(space_idx) = rest.find(' ') {
                         let filename = &rest[..space_idx];
                         let content = &rest[space_idx + 1..];
-                        let mut vfs = crate::vfs::VFS.lock();
+                        let mut vfs = crate::fs::VFS.lock();
                         let curr = vfs.current_inode;
                         match vfs.create_file_at(curr, filename, content.as_bytes()) {
                             Ok(_) => crate::println!("Wrote {} bytes to '{}'", content.len(), filename),
@@ -354,7 +355,7 @@ impl Shell {
                 if name.is_empty() {
                     crate::println!("Usage: rm <file_or_dir_name>");
                 } else {
-                    let mut vfs = crate::vfs::VFS.lock();
+                    let mut vfs = crate::fs::VFS.lock();
                     match vfs.resolve_path(name) {
                         Ok(target_id) => match vfs.remove_entry(target_id) {
                             Ok(_) => crate::println!("Removed: {}", name),
@@ -368,8 +369,8 @@ impl Shell {
             "readsec" => {
                 let lba_str = parts.next().unwrap_or("0");
                 let lba = parse_u64(lba_str).unwrap_or(0) as u32;
-                let mut buf = [0u8; crate::ata::SECTOR_SIZE];
-                match crate::ata::read_sector(lba, &mut buf) {
+                let mut buf = [0u8; crate::drivers::ata::SECTOR_SIZE];
+                match crate::drivers::ata::read_sector(lba, &mut buf) {
                     Ok(()) => {
                         crate::println!("--- ATA SECTOR {} (FIRST 32 BYTES) ---", lba);
                         for chunk in buf[..32].chunks(16) {
@@ -386,7 +387,7 @@ impl Shell {
 
             "test" | "selftest" => {
                 crate::println!("--- AURAOS AUTOMATED SUBSYSTEM SELF-TESTS ---");
-                let results = crate::selftest::run_all_tests();
+                let results = crate::tests::run_all_tests();
                 let mut all_ok = true;
                 for res in &results {
                     if res.passed {
@@ -418,13 +419,13 @@ impl Shell {
                 crate::println!("Powering off system via ACPI...");
                 unsafe {
                     // Modern QEMU ACPI poweroff
-                    crate::io::outw(0x604, 0x2000);
+                    crate::arch::io::outw(0x604, 0x2000);
                     // Legacy Bochs / older QEMU
-                    crate::io::outw(0xB004, 0x2000);
+                    crate::arch::io::outw(0xB004, 0x2000);
                     // VirtualBox ACPI shutdown
-                    crate::io::outw(0x4004, 0x3400);
+                    crate::arch::io::outw(0x4004, 0x3400);
                     // Cloud Hypervisor
-                    crate::io::outw(0x600, 0x34);
+                    crate::arch::io::outw(0x600, 0x34);
 
                     crate::println!("ACPI poweroff triggered. Halting CPU.");
                     loop {
@@ -468,5 +469,4 @@ fn parse_u64(s: &str) -> Result<u64, ()> {
 }
 
 /// Global singleton instance of the AuraOS Shell, synchronized with a Spinlock.
-pub static SHELL: crate::vga_buffer::Spinlock<Shell> =
-    crate::vga_buffer::Spinlock::new(Shell::new());
+pub static SHELL: Spinlock<Shell> = Spinlock::new(Shell::new());

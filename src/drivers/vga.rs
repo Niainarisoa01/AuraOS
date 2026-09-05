@@ -1,6 +1,13 @@
+/// ============================================================================
+/// VGA Text Mode Driver (80x25 Memory Mapped at 0xb8000)
+/// ============================================================================
+///
+/// Hardware text buffer driver managing characters, 16-color attributes,
+/// hardware scrolling, backspace handling, and global formatted print macros.
+
 use core::fmt;
 use core::ptr::write_volatile;
-use core::sync::atomic::{AtomicBool, Ordering};
+use crate::sync::Spinlock;
 
 /// Standard 16 colors for the x86 VGA text palette.
 #[allow(dead_code)]
@@ -173,56 +180,6 @@ impl fmt::Write for Writer {
     }
 }
 
-// ============================================================================
-// Bare-Metal Spinlock for Thread-Safety and Interrupt Protection
-// ============================================================================
-
-pub struct Spinlock<T> {
-    lock: AtomicBool,
-    data: core::cell::UnsafeCell<T>,
-}
-
-unsafe impl<T: Send> Sync for Spinlock<T> {}
-
-impl<T> Spinlock<T> {
-    pub const fn new(data: T) -> Self {
-        Self {
-            lock: AtomicBool::new(false),
-            data: core::cell::UnsafeCell::new(data),
-        }
-    }
-
-    pub fn lock(&self) -> SpinlockGuard<'_, T> {
-        while self.lock.swap(true, Ordering::Acquire) {
-            core::hint::spin_loop();
-        }
-        SpinlockGuard { spinlock: self }
-    }
-}
-
-pub struct SpinlockGuard<'a, T> {
-    spinlock: &'a Spinlock<T>,
-}
-
-impl<'a, T> core::ops::Deref for SpinlockGuard<'a, T> {
-    type Target = T;
-    fn deref(&self) -> &T {
-        unsafe { &*self.spinlock.data.get() }
-    }
-}
-
-impl<'a, T> core::ops::DerefMut for SpinlockGuard<'a, T> {
-    fn deref_mut(&mut self) -> &mut T {
-        unsafe { &mut *self.spinlock.data.get() }
-    }
-}
-
-impl<'a, T> Drop for SpinlockGuard<'a, T> {
-    fn drop(&mut self) {
-        self.spinlock.lock.store(false, Ordering::Release);
-    }
-}
-
 /// Global singleton instance of the VGA text writer, synchronized with a Spinlock.
 pub static WRITER: Spinlock<Writer> = Spinlock::new(Writer {
     column_position: 0,
@@ -236,7 +193,7 @@ pub static WRITER: Spinlock<Writer> = Spinlock::new(Writer {
 
 #[macro_export]
 macro_rules! print {
-    ($($arg:tt)*) => ($crate::vga_buffer::_print(format_args!($($arg)*)));
+    ($($arg:tt)*) => ($crate::drivers::vga::_print(format_args!($($arg)*)));
 }
 
 #[macro_export]

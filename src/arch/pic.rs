@@ -14,7 +14,7 @@
 /// Therefore, we MUST remap the PIC so that hardware interrupts are shifted
 /// beyond the CPU exceptions (vectors 32 to 47: 0x20 to 0x2F).
 
-use crate::io::{inb, io_wait, outb};
+use super::io::{inb, io_wait, outb};
 
 const PIC1_COMMAND: u16 = 0x20;
 const PIC1_DATA: u16 = 0x21;

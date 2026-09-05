@@ -10,7 +10,7 @@
 
 use core::alloc::{GlobalAlloc, Layout};
 use core::ptr;
-use crate::vga_buffer::Spinlock;
+use crate::sync::{Spinlock, SpinlockGuard};
 
 /// Total heap size: 512 KiB.
 pub const HEAP_SIZE: usize = 512 * 1024;
@@ -217,7 +217,7 @@ impl LockedHeap {
         LockedHeap(Spinlock::new(LinkedListAllocator::new()))
     }
 
-    pub fn lock(&self) -> crate::vga_buffer::SpinlockGuard<'_, LinkedListAllocator> {
+    pub fn lock(&self) -> SpinlockGuard<'_, LinkedListAllocator> {
         self.0.lock()
     }
 }

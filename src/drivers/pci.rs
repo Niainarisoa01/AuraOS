@@ -10,7 +10,7 @@
 /// - 0xCF8: PCI Configuration Address (CONFIG_ADDRESS)
 /// - 0xCFC: PCI Configuration Data (CONFIG_DATA)
 
-use crate::io::{inl, outl};
+use crate::arch::io::{inl, outl};
 use alloc::vec::Vec;
 
 const PCI_CONFIG_ADDRESS: u16 = 0xCF8;

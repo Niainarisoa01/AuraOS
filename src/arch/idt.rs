@@ -9,6 +9,8 @@
 /// In x86_64, each entry is 16 bytes wide and contains the handler address,
 /// segment selector, and gate attributes.
 
+use core::cell::UnsafeCell;
+
 /// 16-byte IDT entry structure in 64-bit Long Mode.
 #[derive(Debug, Clone, Copy)]
 #[repr(C, packed)]
@@ -61,8 +63,6 @@ pub struct IdtPointer {
 /// Maximum number of IDT entries supported by x86_64.
 const IDT_ENTRIES: usize = 256;
 
-use core::cell::UnsafeCell;
-
 /// Thread-safe wrapper for the static IDT table.
 struct IdtWrapper(UnsafeCell<[IdtEntry; IDT_ENTRIES]>);
 unsafe impl Sync for IdtWrapper {}
@@ -70,73 +70,59 @@ unsafe impl Sync for IdtWrapper {}
 /// Static IDT table (256 entries, all initialized to empty).
 static IDT: IdtWrapper = IdtWrapper(UnsafeCell::new([IdtEntry::missing(); IDT_ENTRIES]));
 
-// ============================================================================
-// CPU-Saved Interrupt Stack Frame
-// ============================================================================
-
-/// The Interrupt Stack Frame is automatically pushed onto the kernel stack
-/// by the CPU prior to invoking an interrupt handler. It preserves the state
-/// of the interrupted execution context.
-#[derive(Debug)]
+/// CPU Exception Stack Frame automatically pushed by the processor upon interrupt.
 #[repr(C)]
 pub struct InterruptStackFrame {
-    pub instruction_pointer: u64,    // RIP: interrupted instruction pointer
-    pub code_segment: u64,           // CS: code segment selector
-    pub cpu_flags: u64,              // RFLAGS: processor status flags
-    pub stack_pointer: u64,          // RSP: stack pointer
-    pub stack_segment: u64,          // SS: stack segment selector
+    pub instruction_pointer: u64, // RIP
+    pub code_segment: u64,        // CS
+    pub cpu_flags: u64,           // RFLAGS
+    pub stack_pointer: u64,       // RSP
+    pub stack_segment: u64,       // SS
 }
 
 // ============================================================================
-// Handlers for Critical CPU Exceptions
+// CPU Exception Handlers (Faults & Traps)
 // ============================================================================
 
-/// Exception 0: Divide by Zero.
-/// Raised when code attempts to divide a number by zero.
+/// Exception 0: Divide-by-Zero (#DE).
 extern "x86-interrupt" fn divide_by_zero_handler(frame: InterruptStackFrame) {
-    crate::println!("\n[EXCEPTION] Division by Zero!");
-    crate::println!("  Faulting RIP : {:#x}", frame.instruction_pointer);
-    crate::println!("  Kernel halted for safety.");
+    crate::println!("\n[FATAL CPU EXCEPTION] Divide by Zero (#DE)");
+    crate::println!("  Faulting RIP: {:#x}", frame.instruction_pointer);
     loop {}
 }
 
-/// Exception 6: Invalid Opcode.
-/// Raised when the processor encounters an unknown or undefined instruction.
+/// Exception 6: Invalid Opcode (#UD).
 extern "x86-interrupt" fn invalid_opcode_handler(frame: InterruptStackFrame) {
-    crate::println!("\n[EXCEPTION] Invalid Opcode (unknown instruction)!");
-    crate::println!("  Faulting RIP : {:#x}", frame.instruction_pointer);
+    crate::println!("\n[FATAL CPU EXCEPTION] Invalid Opcode (#UD)");
+    crate::println!("  Faulting RIP: {:#x}", frame.instruction_pointer);
     loop {}
 }
 
-/// Exception 8: Double Fault.
-/// Raised when an exception occurs while trying to invoke a prior exception handler.
-/// If unhandled, the processor escalates to a Triple Fault (instant reboot).
-extern "x86-interrupt" fn double_fault_handler(frame: InterruptStackFrame, _error_code: u64) -> ! {
-    crate::println!("\n[CRITICAL EXCEPTION] DOUBLE FAULT!");
-    crate::println!("  Faulting RIP : {:#x}", frame.instruction_pointer);
-    crate::println!("  Kernel cannot recover. System halted.");
+/// Exception 8: Double Fault (#DF).
+extern "x86-interrupt" fn double_fault_handler(frame: InterruptStackFrame, error_code: u64) -> ! {
+    crate::println!("\n[CRITICAL CPU EXCEPTION] Double Fault (#DF)");
+    crate::println!("  Error Code  : {:#x}", error_code);
+    crate::println!("  Faulting RIP: {:#x}", frame.instruction_pointer);
     loop {}
 }
 
-/// Exception 13: General Protection Fault (GPF).
-/// Raised on privilege level violations or illegal memory access attempts.
+/// Exception 13: General Protection Fault (#GP).
 extern "x86-interrupt" fn general_protection_fault_handler(frame: InterruptStackFrame, error_code: u64) {
-    crate::println!("\n[EXCEPTION] General Protection Fault (GPF)!");
-    crate::println!("  Error code   : {:#x}", error_code);
-    crate::println!("  Faulting RIP : {:#x}", frame.instruction_pointer);
+    crate::println!("\n[FATAL CPU EXCEPTION] General Protection Fault (#GP)");
+    crate::println!("  Error Code  : {:#x}", error_code);
+    crate::println!("  Faulting RIP: {:#x}", frame.instruction_pointer);
     loop {}
 }
 
-/// Exception 14: Page Fault.
-/// Raised when accessing an unmapped or protected virtual memory address.
+/// Exception 14: Page Fault (#PF).
 extern "x86-interrupt" fn page_fault_handler(frame: InterruptStackFrame, error_code: u64) {
-    // Register CR2 holds the linear faulting address
-    let cr2: u64;
-    unsafe { core::arch::asm!("mov {}, cr2", out(reg) cr2, options(nostack, preserves_flags)) };
-
-    crate::println!("\n[EXCEPTION] Page Fault (invalid memory access)!");
-    crate::println!("  Faulting Address (CR2) : {:#x}", cr2);
-    crate::println!("  Error Code             : {:#x}", error_code);
+    let faulting_address: u64;
+    unsafe {
+        core::arch::asm!("mov {}, cr2", out(reg) faulting_address, options(nomem, nostack, preserves_flags));
+    }
+    crate::println!("\n[FATAL CPU EXCEPTION] Page Fault (#PF)");
+    crate::println!("  Accessed Address (CR2) : {:#x}", faulting_address);
+    crate::println!("  Error Code Flags       : {:#b}", error_code);
     crate::println!("  Faulting RIP           : {:#x}", frame.instruction_pointer);
     loop {}
 }
@@ -152,13 +138,13 @@ static TICKS: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new
 extern "x86-interrupt" fn timer_handler(_frame: InterruptStackFrame) {
     TICKS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
     crate::task::timer_tick();
-    crate::pic::send_eoi(crate::pic::IRQ_TIMER);
+    super::pic::send_eoi(super::pic::IRQ_TIMER);
 }
 
 /// IRQ 1: PS/2 Keyboard Keystroke.
 extern "x86-interrupt" fn keyboard_handler(_frame: InterruptStackFrame) {
-    crate::keyboard::handle_interrupt();
-    crate::pic::send_eoi(crate::pic::IRQ_KEYBOARD);
+    crate::drivers::keyboard::handle_interrupt();
+    super::pic::send_eoi(super::pic::IRQ_KEYBOARD);
 }
 
 /// Returns the number of system timer ticks elapsed since boot.
@@ -184,9 +170,9 @@ pub fn init() {
         (*idt)[14].set_handler(page_fault_handler as *const () as u64);
 
         // Hardware IRQs (32..47)
-        (*idt)[crate::pic::PIC1_OFFSET as usize + crate::pic::IRQ_TIMER as usize]
+        (*idt)[super::pic::PIC1_OFFSET as usize + super::pic::IRQ_TIMER as usize]
             .set_handler(timer_handler as *const () as u64);
-        (*idt)[crate::pic::PIC1_OFFSET as usize + crate::pic::IRQ_KEYBOARD as usize]
+        (*idt)[super::pic::PIC1_OFFSET as usize + super::pic::IRQ_KEYBOARD as usize]
             .set_handler(keyboard_handler as *const () as u64);
 
         let idt_ptr = IdtPointer {
