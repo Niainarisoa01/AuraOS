@@ -12,6 +12,7 @@ mod pic;
 mod keyboard;
 mod memory;
 mod allocator;
+mod serial;
 mod shell;
 
 use alloc::boxed::Box;
@@ -23,6 +24,12 @@ use core::panic::PanicInfo;
 /// Called by the bootloader in 64-bit Long Mode.
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() -> ! {
+    // Step 0: Initialize COM1 serial port for immediate debug logging
+    serial::init();
+    serial_println!("============================================================");
+    serial_println!("        AuraOS Kernel v0.1.0 - Booting Up...                ");
+    serial_println!("============================================================");
+
     // ==========================================
     // AuraOS Kernel Boot Phase
     // ==========================================
@@ -34,15 +41,19 @@ pub extern "C" fn _start() -> ! {
     // Step 1: Initialize the Global Descriptor Table (GDT)
     gdt::init();
     println!("[OK] GDT       : Global Descriptor Table loaded.");
+    serial_println!("[OK] GDT loaded.");
 
     // Step 2: Initialize and remap the dual 8259 PIC controllers
     pic::init();
+    serial_println!("[OK] PIC remapped.");
 
     // Step 3: Initialize the Interrupt Descriptor Table (IDT)
     idt::init();
+    serial_println!("[OK] IDT loaded.");
 
     // Step 4: Initialize the 512 KiB Dynamic Heap Allocator
     allocator::init_heap();
+    serial_println!("[OK] 512 KiB Heap initialized.");
 
     // Step 5: Verify dynamic allocations (Box, Vec, String)
     {
@@ -54,16 +65,19 @@ pub extern "C" fn _start() -> ! {
         let test_str = format!("AuraOS Dynamic String (Vec len = {})", test_vec.len());
         println!("[OK] Allocator : Box({}), Vec({:?}), String ready.", *heap_val, &test_vec[..3]);
         println!("                 {}", test_str);
+        serial_println!("[OK] Dynamic allocations verified: Box, Vec, String.");
     }
 
     // Step 6: Enable hardware interrupts at the CPU level
     unsafe { core::arch::asm!("sti", options(nomem, nostack)) };
     println!("[OK] CPU       : Hardware interrupts enabled (sti).");
+    serial_println!("[OK] Interrupts enabled (sti).");
 
     // Step 7: System status report
     println!();
     println!("[OK] Mode      : x86_64 Bare-Metal Long Mode (64-bit)");
     println!("[OK] Memory    : 512 KiB Heap, 4 KiB Paging abstractions");
+    println!("[OK] Serial    : COM1 UART at 0x3F8 (115200 baud)");
     println!("[OK] Video     : VGA 80x25 text mode with auto-scrolling");
     println!("[OK] Keyboard  : PS/2 driver active (direct typing)");
     println!();
@@ -71,6 +85,8 @@ pub extern "C" fn _start() -> ! {
     println!("  AuraOS v0.1.0 ready. Interactive console active:");
     println!("------------------------------------------------------------");
     print!("auraos> ");
+
+    serial_println!("AuraOS v0.1.0 interactive console ready.");
 
     // Low-power idle loop (HLT):
     // The CPU halts and only wakes up when a hardware interrupt
@@ -83,6 +99,7 @@ pub extern "C" fn _start() -> ! {
 /// Invoked on panic. Prints error message and halts CPU.
 #[panic_handler]
 fn panic(info: &PanicInfo) -> ! {
+    serial_println!("\n[KERNEL PANIC] {}", info);
     println!();
     println!("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!");
     println!("  KERNEL PANIC - AuraOS encountered a fatal error!");

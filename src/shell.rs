@@ -70,6 +70,7 @@ impl Shell {
                 crate::println!("  clear       - Clear the VGA screen");
                 crate::println!("  info        - Display system and CPU status");
                 crate::println!("  mem         - Display physical/virtual memory & heap usage");
+                crate::println!("  serial <msg>- Send a message to the COM1 serial port");
                 crate::println!("  ticks       - Display system timer ticks (PIT IRQ0)");
                 crate::println!("  manifesto   - AuraOS 10-year roadmap & architecture vision");
                 crate::println!("  calc <a+b>  - Evaluate a simple addition");
@@ -90,6 +91,7 @@ impl Shell {
                 crate::println!("  Architecture   : x86_64 Long Mode (64-bit pure Rust)");
                 crate::println!("  Memory Model   : 4-Level Paging (PML4 at {:#x})", cr3.as_u64());
                 crate::println!("  Heap Allocator : 512 KiB Linked List Allocator (Dynamic)");
+                crate::println!("  Serial Port    : COM1 (UART 16550 at 0x3F8, 115200 baud)");
                 crate::println!("  Video Driver   : VGA Text Mode 80x25 (Buffer 0xb8000)");
                 crate::println!("  IRQ Controller : Dual 8259 PIC remapped (32..47)");
                 crate::println!("  Protection     : 64-bit GDT + 256-entry IDT");
@@ -110,6 +112,16 @@ impl Shell {
                 crate::println!("  Heap Used    : {} bytes", used);
                 crate::println!("  Heap Free    : {} bytes ({} KiB)", free, free / 1024);
                 crate::println!("-------------------------------");
+            }
+
+            "serial" => {
+                let msg = cmd.strip_prefix("serial").unwrap_or("").trim();
+                if msg.is_empty() {
+                    crate::println!("  Usage: serial <message to send to COM1>");
+                } else {
+                    crate::serial_println!("[SERIAL COM1] {}", msg);
+                    crate::println!("  [OK] Sent to COM1: \"{}\"", msg);
+                }
             }
 
             "ticks" => {
