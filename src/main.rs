@@ -15,6 +15,8 @@ mod allocator;
 mod serial;
 mod cmos;
 mod cpuid;
+mod pci;
+mod task;
 mod shell;
 
 use alloc::boxed::Box;
@@ -78,12 +80,27 @@ pub extern "C" fn _start() -> ! {
     serial_println!("[OK] Processor: {} ({})", cpu.brand_str(), cpu.vendor_str());
     serial_println!("[OK] RTC Clock: {:04}-{:02}-{:02} {:02}:{:02}:{:02} UTC", rtc.year, rtc.month, rtc.day, rtc.hour, rtc.minute, rtc.second);
 
-    // Step 7: Enable hardware interrupts at the CPU level
+    // Step 7: PCI Hardware Bus Enumeration
+    let pci_devices = pci::scan_pci_bus();
+    println!("[OK] PCI Bus   : Discovered {} active hardware device(s).", pci_devices.len());
+    serial_println!("[OK] PCI Bus: {} active device(s) enumerated.", pci_devices.len());
+    for dev in &pci_devices {
+        serial_println!("      [{:02x}:{:02x}.{}] {:04x}:{:04x} | {} - {}",
+            dev.bus, dev.slot, dev.func, dev.vendor_id, dev.device_id,
+            dev.vendor_name(), dev.class_name());
+    }
+
+    // Step 8: Initialize Kernel Multitasking & Scheduler
+    task::init();
+    println!("[OK] Tasks     : Round-Robin scheduler initialized (TCBs ready).");
+    serial_println!("[OK] Multitasking initialized.");
+
+    // Step 9: Enable hardware interrupts at the CPU level
     unsafe { core::arch::asm!("sti", options(nomem, nostack)) };
     println!("[OK] CPU       : Hardware interrupts enabled (sti).");
     serial_println!("[OK] Interrupts enabled (sti).");
 
-    // Step 8: System status report
+    // Step 10: System status report
     println!();
     println!("[OK] Mode      : x86_64 Bare-Metal Long Mode (64-bit)");
     println!("[OK] Memory    : 512 KiB Heap, 4 KiB Paging abstractions");

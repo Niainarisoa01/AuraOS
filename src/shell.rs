@@ -70,6 +70,9 @@ impl Shell {
                 crate::println!("  clear       - Clear the VGA screen");
                 crate::println!("  info        - Display system and CPU status");
                 crate::println!("  cpu         - Display detailed CPUID processor features");
+                crate::println!("  pci / lspci - Enumerate and inspect PCI hardware devices");
+                crate::println!("  tasks / ps  - Display kernel tasks, states, and stack pointers");
+                crate::println!("  yield       - Cooperatively yield CPU slice to background worker");
                 crate::println!("  time / date - Display hardware RTC calendar date & time");
                 crate::println!("  mem         - Display physical/virtual memory & heap usage");
                 crate::println!("  serial <msg>- Send a message to the COM1 serial port");
@@ -122,6 +125,40 @@ impl Shell {
                 crate::println!("    * AVX        : {}", if cpu.has_avx { "Supported" } else { "No" });
                 crate::println!("    * RDRAND     : {}", if cpu.has_rdrand { "Supported" } else { "No" });
                 crate::println!("------------------------------------");
+            }
+
+            "pci" | "lspci" => {
+                let devices = crate::pci::scan_pci_bus();
+                crate::println!("--- DISCOVERED PCI BUS DEVICES ({}) ---", devices.len());
+                if devices.is_empty() {
+                    crate::println!("  No PCI devices found on scanned buses.");
+                } else {
+                    for dev in &devices {
+                        crate::println!("[{:02x}:{:02x}.{}] {:04x}:{:04x} | {} - {}",
+                            dev.bus, dev.slot, dev.func, dev.vendor_id, dev.device_id,
+                            dev.vendor_name(), dev.class_name());
+                    }
+                }
+                crate::println!("---------------------------------------");
+            }
+
+            "tasks" | "ps" => {
+                let sched = crate::task::SCHEDULER.lock();
+                let count = crate::task::SENTINEL_HEARTBEATS.load(core::sync::atomic::Ordering::SeqCst);
+                crate::println!("--- AURAOS KERNEL TASK SCHEDULER ---");
+                crate::println!("PID  NAME               STATE     TICKS      RSP");
+                for task in &sched.tasks {
+                    crate::println!("{:<4} {:<18} {:<9} {:<10} {:#x}",
+                        task.id, task.name, task.state.as_str(), task.ticks, task.rsp);
+                }
+                crate::println!("Sentinel Heartbeats sent: {}", count);
+                crate::println!("-----------------------------------");
+            }
+
+            "yield" => {
+                crate::println!("Yielding CPU time slice to background tasks...");
+                crate::task::yield_now();
+                crate::println!("Resumed in kernel shell!");
             }
 
             "time" | "date" => {
