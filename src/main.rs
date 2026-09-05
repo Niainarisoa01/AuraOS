@@ -19,6 +19,7 @@ mod pci;
 mod task;
 mod vfs;
 mod ata;
+mod selftest;
 mod shell;
 
 use alloc::boxed::Box;
@@ -107,7 +108,29 @@ pub extern "C" fn _start() -> ! {
     println!("[OK] CPU       : Hardware interrupts enabled (sti).");
     serial_println!("[OK] Interrupts enabled (sti).");
 
-    // Step 11: System status report
+    // Step 11: Execute Kernel Automated Subsystem Diagnostics
+    println!();
+    println!("[DIAG] Running AuraOS automated self-test verification...");
+    let test_results = selftest::run_all_tests();
+    let mut all_passed = true;
+    for res in &test_results {
+        if res.passed {
+            println!("  [PASS] {}", res.name);
+            serial_println!("  [PASS] {} -- {}", res.name, res.detail);
+        } else {
+            all_passed = false;
+            println!("  [FAIL] {} ({})", res.name, res.detail);
+            serial_println!("  [FAIL] {} -- {}", res.name, res.detail);
+        }
+    }
+    if all_passed {
+        println!("[OK] All {} subsystem tests PASSED. System verified 100%.", test_results.len());
+        serial_println!("[OK] All {} automated self-tests passed.", test_results.len());
+    } else {
+        println!("[WARN] One or more diagnostic checks reported issues.");
+    }
+
+    // Step 12: System status report
     println!();
     println!("[OK] Mode      : x86_64 Bare-Metal Long Mode (64-bit)");
     println!("[OK] Memory    : 512 KiB Heap, 4 KiB Paging abstractions");

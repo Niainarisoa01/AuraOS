@@ -87,6 +87,7 @@ impl Shell {
                 crate::println!("  write <f> <t> Write text content into a file");
                 crate::println!("  rm <name>   - Remove a file or directory entry");
                 crate::println!("  readsec <lba> Read 512-byte raw disk sector via ATA PIO");
+                crate::println!("  test        - Run automated kernel subsystem self-tests");
                 crate::println!("  reboot      - Reset and restart the computer");
                 crate::println!("  shutdown    - Power off the system / virtual machine");
                 crate::println!("  halt        - Put the CPU into deep sleep");
@@ -381,6 +382,28 @@ impl Shell {
                     }
                     Err(err) => crate::println!("readsec: error reading sector {}: {}", lba, err),
                 }
+            }
+
+            "test" | "selftest" => {
+                crate::println!("--- AURAOS AUTOMATED SUBSYSTEM SELF-TESTS ---");
+                let results = crate::selftest::run_all_tests();
+                let mut all_ok = true;
+                for res in &results {
+                    if res.passed {
+                        crate::println!("  [PASS] {}", res.name);
+                        crate::println!("         Detail: {}", res.detail);
+                    } else {
+                        all_ok = false;
+                        crate::println!("  [FAIL] {}", res.name);
+                        crate::println!("         Detail: {}", res.detail);
+                    }
+                }
+                if all_ok {
+                    crate::println!("Result: All {} tests passed successfully! System 100% OK.", results.len());
+                } else {
+                    crate::println!("Result: One or more tests failed!");
+                }
+                crate::println!("----------------------------------------------");
             }
 
             "reboot" => {
