@@ -78,7 +78,15 @@ impl Shell {
                 crate::println!("  serial <msg>- Send a message to the COM1 serial port");
                 crate::println!("  ticks       - Display system timer ticks (PIT IRQ0)");
                 crate::println!("  manifesto   - AuraOS 10-year roadmap & architecture vision");
-                crate::println!("  calc <a+b>  - Evaluate a simple addition");
+                crate::println!("  ls [path]   - List directory contents (files & folders)");
+                crate::println!("  cd <path>   - Change current working directory");
+                crate::println!("  pwd         - Print current working directory");
+                crate::println!("  cat <file>  - Display contents of a text file");
+                crate::println!("  touch <file>- Create a new empty file in RAMFS");
+                crate::println!("  mkdir <dir> - Create a new directory");
+                crate::println!("  write <f> <t> Write text content into a file");
+                crate::println!("  rm <name>   - Remove a file or directory entry");
+                crate::println!("  readsec <lba> Read 512-byte raw disk sector via ATA PIO");
                 crate::println!("  reboot      - Reset and restart the computer");
                 crate::println!("  shutdown    - Power off the system / virtual machine");
                 crate::println!("  halt        - Put the CPU into deep sleep");
@@ -217,6 +225,161 @@ impl Shell {
                     }
                 } else {
                     crate::println!("  Usage: calc <number>+<number>  (Example: calc 123+456)");
+                }
+            }
+
+            "pwd" => {
+                let vfs = crate::vfs::VFS.lock();
+                let path = vfs.get_path(vfs.current_inode);
+                crate::println!("{}", path);
+            }
+
+            "cd" => {
+                let target = parts.next().unwrap_or("/");
+                let mut vfs = crate::vfs::VFS.lock();
+                match vfs.resolve_path(target) {
+                    Ok(node_id) => {
+                        if vfs.inodes[node_id].is_dir() {
+                            vfs.current_inode = node_id;
+                        } else {
+                            crate::println!("cd: not a directory: {}", target);
+                        }
+                    }
+                    Err(err) => crate::println!("cd: {}: {}", target, err),
+                }
+            }
+
+            "ls" => {
+                let target = parts.next().unwrap_or("");
+                let vfs = crate::vfs::VFS.lock();
+                let dir_id = if target.is_empty() {
+                    vfs.current_inode
+                } else {
+                    match vfs.resolve_path(target) {
+                        Ok(id) => id,
+                        Err(err) => {
+                            crate::println!("ls: {}: {}", target, err);
+                            return;
+                        }
+                    }
+                };
+
+                match vfs.list_directory(dir_id) {
+                    Ok(entries) => {
+                        crate::println!("TYPE    SIZE (BYTES)  NAME");
+                        crate::println!("----    ------------  ----");
+                        for entry in &entries {
+                            let type_str = if entry.is_dir { "<DIR> " } else { "<FILE>" };
+                            crate::println!("{}  {:<12}  {}", type_str, entry.size, entry.name);
+                        }
+                        crate::println!("Total entries: {}", entries.len());
+                    }
+                    Err(err) => crate::println!("ls: {}", err),
+                }
+            }
+
+            "cat" => {
+                let path = parts.next().unwrap_or("");
+                if path.is_empty() {
+                    crate::println!("Usage: cat <file_path>");
+                } else {
+                    let vfs = crate::vfs::VFS.lock();
+                    match vfs.resolve_path(path) {
+                        Ok(file_id) => match vfs.read_file(file_id) {
+                            Ok(bytes) => {
+                                if let Ok(text) = core::str::from_utf8(bytes) {
+                                    crate::println!("{}", text);
+                                } else {
+                                    crate::println!("<Binary content: {} bytes>", bytes.len());
+                                }
+                            }
+                            Err(err) => crate::println!("cat: {}: {}", path, err),
+                        },
+                        Err(err) => crate::println!("cat: {}: {}", path, err),
+                    }
+                }
+            }
+
+            "touch" => {
+                let file_name = parts.next().unwrap_or("");
+                if file_name.is_empty() {
+                    crate::println!("Usage: touch <file_name>");
+                } else {
+                    let mut vfs = crate::vfs::VFS.lock();
+                    let curr = vfs.current_inode;
+                    match vfs.create_file_at(curr, file_name, b"") {
+                        Ok(_) => crate::println!("File created: {}", file_name),
+                        Err(err) => crate::println!("touch: {}: {}", file_name, err),
+                    }
+                }
+            }
+
+            "mkdir" => {
+                let dir_name = parts.next().unwrap_or("");
+                if dir_name.is_empty() {
+                    crate::println!("Usage: mkdir <directory_name>");
+                } else {
+                    let mut vfs = crate::vfs::VFS.lock();
+                    let curr = vfs.current_inode;
+                    match vfs.mkdir_at(curr, dir_name) {
+                        Ok(_) => crate::println!("Directory created: {}", dir_name),
+                        Err(err) => crate::println!("mkdir: {}: {}", dir_name, err),
+                    }
+                }
+            }
+
+            "write" => {
+                if let Some(rest) = cmd.strip_prefix("write ") {
+                    let rest = rest.trim_start();
+                    if let Some(space_idx) = rest.find(' ') {
+                        let filename = &rest[..space_idx];
+                        let content = &rest[space_idx + 1..];
+                        let mut vfs = crate::vfs::VFS.lock();
+                        let curr = vfs.current_inode;
+                        match vfs.create_file_at(curr, filename, content.as_bytes()) {
+                            Ok(_) => crate::println!("Wrote {} bytes to '{}'", content.len(), filename),
+                            Err(err) => crate::println!("write: {}: {}", filename, err),
+                        }
+                    } else {
+                        crate::println!("Usage: write <filename> <content...>");
+                    }
+                } else {
+                    crate::println!("Usage: write <filename> <content...>");
+                }
+            }
+
+            "rm" => {
+                let name = parts.next().unwrap_or("");
+                if name.is_empty() {
+                    crate::println!("Usage: rm <file_or_dir_name>");
+                } else {
+                    let mut vfs = crate::vfs::VFS.lock();
+                    match vfs.resolve_path(name) {
+                        Ok(target_id) => match vfs.remove_entry(target_id) {
+                            Ok(_) => crate::println!("Removed: {}", name),
+                            Err(err) => crate::println!("rm: {}: {}", name, err),
+                        },
+                        Err(err) => crate::println!("rm: {}: {}", name, err),
+                    }
+                }
+            }
+
+            "readsec" => {
+                let lba_str = parts.next().unwrap_or("0");
+                let lba = parse_u64(lba_str).unwrap_or(0) as u32;
+                let mut buf = [0u8; crate::ata::SECTOR_SIZE];
+                match crate::ata::read_sector(lba, &mut buf) {
+                    Ok(()) => {
+                        crate::println!("--- ATA SECTOR {} (FIRST 32 BYTES) ---", lba);
+                        for chunk in buf[..32].chunks(16) {
+                            for b in chunk {
+                                crate::print!("{:02x} ", b);
+                            }
+                            crate::println!();
+                        }
+                        crate::println!("--------------------------------------");
+                    }
+                    Err(err) => crate::println!("readsec: error reading sector {}: {}", lba, err),
                 }
             }
 

@@ -17,6 +17,8 @@ mod cmos;
 mod cpuid;
 mod pci;
 mod task;
+mod vfs;
+mod ata;
 mod shell;
 
 use alloc::boxed::Box;
@@ -95,15 +97,22 @@ pub extern "C" fn _start() -> ! {
     println!("[OK] Tasks     : Round-Robin scheduler initialized (TCBs ready).");
     serial_println!("[OK] Multitasking initialized.");
 
-    // Step 9: Enable hardware interrupts at the CPU level
+    // Step 9: Initialize Virtual File System & RAMFS
+    vfs::init();
+    println!("[OK] VFS       : Root RAM disk mounted at '/' (hierarchy ready).");
+    serial_println!("[OK] VFS & RAMFS mounted.");
+
+    // Step 10: Enable hardware interrupts at the CPU level
     unsafe { core::arch::asm!("sti", options(nomem, nostack)) };
     println!("[OK] CPU       : Hardware interrupts enabled (sti).");
     serial_println!("[OK] Interrupts enabled (sti).");
 
-    // Step 10: System status report
+    // Step 11: System status report
     println!();
     println!("[OK] Mode      : x86_64 Bare-Metal Long Mode (64-bit)");
     println!("[OK] Memory    : 512 KiB Heap, 4 KiB Paging abstractions");
+    println!("[OK] Filesystem: Virtual Inode VFS mounted at '/'");
+    println!("[OK] Storage   : ATA / IDE PIO 28-bit driver active");
     println!("[OK] Serial    : COM1 UART at 0x3F8 (115200 baud)");
     println!("[OK] Video     : VGA 80x25 text mode with auto-scrolling");
     println!("[OK] Keyboard  : PS/2 driver active (direct typing)");
