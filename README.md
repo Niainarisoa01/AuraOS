@@ -88,7 +88,7 @@ Consultez le document complet du cahier des charges : [OS_MANIFESTE_ET_OBJECTIFS
 Le noyau [`aura_kernel`](./aura_kernel) est un système d'exploitation x86_64 Long Mode 100% Rust bare-metal :
 * **Version :** `v0.1.0-alpha`
 * **Mode :** Bare-Metal (`#![no_std]`, `#![no_main]`, x86_64 Long Mode 64-bit)
-* **Image Disque Amorçable :** `118 Ko` (`bootimage-aura-kernel.bin`)
+* **Image Disque Amorçable :** `149 Ko` (`bootimage-aura-kernel.bin`)
 * **Sortie Vidéo :** Buffer VGA texte 80x25 (`0xb8000`), avec défilement fluide, couleurs HSL et atomic spinlocks
 * **Série & Débogage :** Pilote UART 16550 COM1 (`0x3F8` à 115200 baud, 8N1) avec macros `serial_print!` / `serial_println!`
 * **Architecture CPU :** GDT 64-bit Ring 0, IDT avec gestion des exceptions processeur (Div/0, Double Fault, Page Fault, GPF...)
@@ -98,12 +98,26 @@ Le noyau [`aura_kernel`](./aura_kernel) est un système d'exploitation x86_64 Lo
   * Horloge Système PIT (IRQ0, 100 Hz)
   * Horloge Temps Réel CMOS (RTC ports `0x70`/`0x71`) avec décodage BCD/binaire
   * Détection Matérielle CPUID (Vendor string, Brand name, flags SSE/AVX/APIC/RDRAND) et compteur de cycles `RDTSC`
+* **Énumération Matérielle PCI :**
+  * Scanner de bus PCI 32-bit (ports `0xCF8` et `0xCFC`)
+  * Classification automatique des contrôleurs (Stockage IDE/SATA/NVMe, Réseau Ethernet, Graphisme VGA, Ponts hôtes)
+* **Multitâche & Ordonnancement de Tâches :**
+  * Blocs de Contrôle de Tâches (TCBs) avec piles de 16 Ko isolées
+  * Routine de commutation de contexte assembleur nu `#[unsafe(naked)]` (`switch_context`)
+  * Ordonnanceur Round-Robin coopératif avec comptabilité CPU sur timer matériel PIT
 * **Gestionnaire de Mémoire :**
   * Pagination x86_64 à 4 niveaux (`CR3`, tables PML4, PDPT, PD, PT)
   * Allocateur de mémoire de tas (Heap Allocator) de 512 Ko à liste chaînée avec fusion de blocs libres (*free coalescing*)
   * Support complet d'`extern crate alloc` (`Box`, `Vec`, `String`, `format!`)
-* **Shell Interactif AuraOS :**
-  * Commandes disponibles : `help`, `info`, `cpu`, `time`, `date`, `mem`, `serial <msg>`, `ticks`, `calc <a+b>`, `clear`, `manifesto`, `reboot`, `halt`
+* **Système de Fichiers Virtuel (VFS) & RAMFS :**
+  * Arborescence à Inodes en mémoire vive avec racine `/` pré-remplie (`/etc/hostname`, `/etc/version`, `/etc/motd`, `/docs/manifesto.txt`, `/bin`)
+  * Navigation de chemins relatifs et absolus (`..`, `.`, `/`)
+* **Pilote de Stockage Disque Dur ATA / IDE :**
+  * Lecture et écriture de secteurs de 512 octets en mode PIO 28-bit LBA (ports `0x1F0` - `0x1F7`)
+* **Shell Interactif Complet AuraOS :**
+  * `help`, `info`, `cpu`, `pci`, `tasks`, `yield`, `time`, `date`, `mem`
+  * `ls`, `cd`, `pwd`, `cat`, `touch`, `mkdir`, `write`, `rm`, `readsec`
+  * `serial <msg>`, `ticks`, `calc <a+b>`, `clear`, `manifesto`, `reboot`, `shutdown`, `halt`
 
 ### Lancer AuraOS dans QEMU
 ```bash
