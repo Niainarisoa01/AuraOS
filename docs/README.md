@@ -88,7 +88,7 @@ Consultez le document complet du cahier des charges : [OS_MANIFESTE_ET_OBJECTIFS
 Le projet se compose actuellement du cœur du noyau [`aura_kernel`](file:///Volumes/Données/installation/aura_kernel) :
 * **Version :** `v0.1.0-alpha`
 * **Mode :** Bare-Metal (`#![no_std]`, `#![no_main]`, x86_64 Long Mode)
-* **Taille binaire (Release) :** Seulement **43 Ko** !
+* **Taille binaire (Release) :** Seulement **57 Ko** !
 
 ### 🧩 Sous-systèmes développés & opérationnels :
 1. **Pilote Vidéo VGA ([`src/vga_buffer.rs`](file:///Volumes/Données/installation/aura_kernel/src/vga_buffer.rs)) :** Buffer texte 80x25 (`0xb8000`), scrolling automatique, formatage `print!` et `println!`, synchronisation atomique via `Spinlock`.
@@ -97,7 +97,9 @@ Le projet se compose actuellement du cœur du noyau [`aura_kernel`](file:///Volu
 4. **Ports I/O ([`src/io.rs`](file:///Volumes/Données/installation/aura_kernel/src/io.rs)) :** Primitives d'entrées/sorties matérielles `inb`, `outb`, et délai `io_wait`.
 5. **Contrôleur PIC 8259 ([`src/pic.rs`](file:///Volumes/Données/installation/aura_kernel/src/pic.rs)) :** Remappage des interruptions matérielles (IRQs 32 à 47), acquittement EOI, masquage sélectif.
 6. **Pilote Clavier PS/2 ([`src/keyboard.rs`](file:///Volumes/Données/installation/aura_kernel/src/keyboard.rs)) :** Décodage Scancode Set 1, support des touches Majuscule (Shift), effacement (Backspace) et Entrée.
-7. **Shell Interactif ([`src/shell.rs`](file:///Volumes/Données/installation/aura_kernel/src/shell.rs)) :** Terminal bare-metal avec commandes intégrées : `help`, `clear`, `info`, `ticks`, `calc <a+b>`, `manifeste`, `reboot`, `halt`.
+7. **Gestion Mémoire & Pagination ([`src/memory.rs`](file:///Volumes/Données/installation/aura_kernel/src/memory.rs)) :** Abstractions d'adresses physiques (`PhysAddr`) et virtuelles (`VirtAddr`), drapeaux de tables de pages x86_64 à 4 niveaux (PML4), lecture du registre de contrôle `CR3`.
+8. **Allocateur de Tas Dynamique ([`src/allocator.rs`](file:///Volumes/Données/installation/aura_kernel/src/allocator.rs)) :** Implémentation complète de `core::alloc::GlobalAlloc` avec gestionnaire par liste chaînée (*Linked List Allocator*) de 512 Ko et fusion automatique des blocs libres (*coalescing*). Active `extern crate alloc` (`Box`, `Vec`, `String`, `format!`).
+9. **Shell Interactif ([`src/shell.rs`](file:///Volumes/Données/installation/aura_kernel/src/shell.rs)) :** Terminal bare-metal avec commandes intégrées : `help`, `clear`, `info`, `mem`, `ticks`, `calc <a+b>`, `manifesto`, `reboot`, `halt`.
 
 ### 🚀 Compiler le noyau
 ```bash
@@ -106,7 +108,7 @@ cargo +nightly build --release
 ```
 
 Le binaire exécutable optimisé est généré dans :
-`aura_kernel/target/x86_64-unknown-none/release/aura-kernel` (43 Ko)
+`aura_kernel/target/x86_64-unknown-none/release/aura-kernel` (57 Ko)
 
 ---
 
