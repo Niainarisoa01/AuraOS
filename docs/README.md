@@ -88,7 +88,7 @@ Consultez le document complet du cahier des charges : [OS_MANIFESTE_ET_OBJECTIFS
 Le projet se compose actuellement du cœur du noyau [`aura_kernel`](file:///Volumes/Données/installation/aura_kernel) :
 * **Version :** `v0.1.0-alpha`
 * **Mode :** Bare-Metal (`#![no_std]`, `#![no_main]`, x86_64 Long Mode)
-* **Taille binaire (Release) :** Seulement **57 Ko** !
+* **Taille binaire (Release) :** Seulement **62 Ko** !
 
 ### 🧩 Sous-systèmes développés & opérationnels :
 1. **Pilote Vidéo VGA ([`src/vga_buffer.rs`](file:///Volumes/Données/installation/aura_kernel/src/vga_buffer.rs)) :** Buffer texte 80x25 (`0xb8000`), scrolling automatique, formatage `print!` et `println!`, synchronisation atomique via `Spinlock`.
@@ -99,7 +99,8 @@ Le projet se compose actuellement du cœur du noyau [`aura_kernel`](file:///Volu
 6. **Pilote Clavier PS/2 ([`src/keyboard.rs`](file:///Volumes/Données/installation/aura_kernel/src/keyboard.rs)) :** Décodage Scancode Set 1, support des touches Majuscule (Shift), effacement (Backspace) et Entrée.
 7. **Gestion Mémoire & Pagination ([`src/memory.rs`](file:///Volumes/Données/installation/aura_kernel/src/memory.rs)) :** Abstractions d'adresses physiques (`PhysAddr`) et virtuelles (`VirtAddr`), drapeaux de tables de pages x86_64 à 4 niveaux (PML4), lecture du registre de contrôle `CR3`.
 8. **Allocateur de Tas Dynamique ([`src/allocator.rs`](file:///Volumes/Données/installation/aura_kernel/src/allocator.rs)) :** Implémentation complète de `core::alloc::GlobalAlloc` avec gestionnaire par liste chaînée (*Linked List Allocator*) de 512 Ko et fusion automatique des blocs libres (*coalescing*). Active `extern crate alloc` (`Box`, `Vec`, `String`, `format!`).
-9. **Shell Interactif ([`src/shell.rs`](file:///Volumes/Données/installation/aura_kernel/src/shell.rs)) :** Terminal bare-metal avec commandes intégrées : `help`, `clear`, `info`, `mem`, `ticks`, `calc <a+b>`, `manifesto`, `reboot`, `halt`.
+9. **Port Série UART 16550 COM1 ([`src/serial.rs`](file:///Volumes/Données/installation/aura_kernel/src/serial.rs)) :** Port de communication série à 115200 bauds (8N1 sur le port `0x3F8`), macros `serial_print!` et `serial_println!`, redirection des logs de diagnostic et panic handler vers terminal externe ou fichier hôte.
+10. **Shell Interactif ([`src/shell.rs`](file:///Volumes/Données/installation/aura_kernel/src/shell.rs)) :** Terminal bare-metal avec commandes intégrées : `help`, `clear`, `info`, `mem`, `serial <msg>`, `ticks`, `calc <a+b>`, `manifesto`, `reboot`, `halt`.
 
 ### 🚀 Compiler le noyau
 ```bash
@@ -108,11 +109,11 @@ cargo +nightly build --release
 ```
 
 Le binaire exécutable optimisé est généré dans :
-`aura_kernel/target/x86_64-unknown-none/release/aura-kernel` (57 Ko)
+`aura_kernel/target/x86_64-unknown-none/release/aura-kernel` (62 Ko)
 
 ---
 
 ## 📜 6. Auteurs & Licence
 
-* **Architecte & Créateur :** Niaina & Antigravity (IA Pair Programmer)
+* **Architecte & Créateur :** Niaina
 * **Licence :** Open-Source sous licence MIT / Apache 2.0 (Double Licence Rust standard).

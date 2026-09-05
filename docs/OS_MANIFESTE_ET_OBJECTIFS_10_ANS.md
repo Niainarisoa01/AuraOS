@@ -1,7 +1,7 @@
 # 🌌 MANIFESTE & CAHIER DES CHARGES : PROJET OS (HORIZON 10 ANS)
 
 > **Nom de code du projet :** `AuraOS` *(ou le nom de votre choix)*  
-> **Auteur & Architecte :** Vous & Antigravity  
+> **Auteur & Architecte :** Vous  
 > **Horizon temporel :** 2026 – 2036 (Feuille de route sur 10 ans)  
 > **Langage principal :** 100% Pur Rust (`#![no_std]`)  
 > **Architectures matérielles cibles :** `x86_64` (Intel/AMD) puis `aarch64` (ARM64)  
