@@ -1,18 +1,18 @@
 /// ============================================================================
-/// PIC 8259 — Contrôleur Programmable d'Interruptions (Dual 8259 PIC)
+/// 8259 PIC — Programmable Interrupt Controller (Dual 8259 PIC)
 /// ============================================================================
 ///
-/// Le PC x86 standard utilise deux puces 8259 en cascade pour acheminer
-/// les interruptions matérielles (IRQs) vers le processeur :
-///   - Maître (PIC 1) : Ports 0x20 (commande) et 0x21 (données / masque)
-///   - Esclave (PIC 2) : Ports 0xA0 (commande) et 0xA1 (données / masque)
+/// Standard x86 hardware uses two cascaded 8259 PIC chips to route
+/// hardware interrupt lines (IRQs) to the CPU:
+///   - Master (PIC 1): Ports 0x20 (command) and 0x21 (data / mask)
+///   - Slave  (PIC 2): Ports 0xA0 (command) and 0xA1 (data / mask)
 ///
-/// Par défaut à l'allumage, le BIOS configure le PIC pour envoyer les IRQ 0-7
-/// sur les vecteurs d'interruption 0x08-0x0F. OR, en mode 64 bits protégé,
-/// ces vecteurs sont réservés aux exceptions critiques du CPU (ex: Double Fault 0x08) !
+/// At power-on, the BIOS maps IRQs 0-7 to CPU interrupt vectors 0x08-0x0F.
+/// However, in 64-bit protected mode, these vectors are reserved for critical
+/// CPU exceptions (e.g. Double Fault 0x08)!
 ///
-/// Il est donc IMPÉRATIF de « remapper » le PIC pour décaler les interruptions
-/// matérielles au-delà des exceptions CPU (vecteurs 32 à 47 : 0x20 à 0x2F).
+/// Therefore, we MUST remap the PIC so that hardware interrupts are shifted
+/// beyond the CPU exceptions (vectors 32 to 47: 0x20 to 0x2F).
 
 use crate::io::{inb, io_wait, outb};
 
@@ -21,65 +21,65 @@ const PIC1_DATA: u16 = 0x21;
 const PIC2_COMMAND: u16 = 0xA0;
 const PIC2_DATA: u16 = 0xA1;
 
-/// Commande de fin d'interruption (End of Interrupt - EOI)
+/// End of Interrupt (EOI) command byte
 const PIC_EOI: u8 = 0x20;
 
-/// Décalage d'interruption pour le PIC Maître (IRQs 0..7 -> Vecteurs 32..39)
+/// Interrupt vector offset for Master PIC (IRQs 0..7 -> Vectors 32..39)
 pub const PIC1_OFFSET: u8 = 32;
-/// Décalage d'interruption pour le PIC Esclave (IRQs 8..15 -> Vecteurs 40..47)
+/// Interrupt vector offset for Slave PIC (IRQs 8..15 -> Vectors 40..47)
 pub const PIC2_OFFSET: u8 = 40;
 
-/// IRQ spécifiques
+/// Specific hardware IRQs
 pub const IRQ_TIMER: u8 = 0;
 pub const IRQ_KEYBOARD: u8 = 1;
 
-/// Initialise et remappe les deux contrôleurs PIC 8259.
+/// Initializes and remaps both 8259 PIC controllers.
 pub fn init() {
     unsafe {
-        // 1. Sauvegarder les masques actuels
+        // 1. Save current masks
         let _mask1 = inb(PIC1_DATA);
         let _mask2 = inb(PIC2_DATA);
 
-        // 2. Début de l'initialisation en mode cascade (ICW1 = 0x11)
+        // 2. Start initialization sequence in cascade mode (ICW1 = 0x11)
         outb(PIC1_COMMAND, 0x11);
         io_wait();
         outb(PIC2_COMMAND, 0x11);
         io_wait();
 
-        // 3. ICW2 : Décalage des vecteurs d'interruptions
-        outb(PIC1_DATA, PIC1_OFFSET); // Master : IRQ 0-7 -> 32-39 (0x20-0x27)
+        // 3. ICW2: Remap interrupt vectors
+        outb(PIC1_DATA, PIC1_OFFSET); // Master: IRQ 0-7 -> 32-39 (0x20-0x27)
         io_wait();
-        outb(PIC2_DATA, PIC2_OFFSET); // Slave  : IRQ 8-15 -> 40-47 (0x28-0x2F)
-        io_wait();
-
-        // 4. ICW3 : Configuration de la cascade entre Maître et Esclave
-        outb(PIC1_DATA, 0x04); // Dire au Maître que l'Esclave est connecté sur IRQ 2 (bit 2 = 4)
-        io_wait();
-        outb(PIC2_DATA, 0x02); // Dire à l'Esclave son identité de cascade (2)
+        outb(PIC2_DATA, PIC2_OFFSET); // Slave:  IRQ 8-15 -> 40-47 (0x28-0x2F)
         io_wait();
 
-        // 5. ICW4 : Mode 8086/88
+        // 4. ICW3: Configure cascading between Master and Slave
+        outb(PIC1_DATA, 0x04); // Tell Master that Slave is on IRQ2 (bit 2 = 4)
+        io_wait();
+        outb(PIC2_DATA, 0x02); // Tell Slave its cascade identity (2)
+        io_wait();
+
+        // 5. ICW4: 8086/88 mode
         outb(PIC1_DATA, 0x01);
         io_wait();
         outb(PIC2_DATA, 0x01);
         io_wait();
 
-        // 6. Configurer les masques d'interruptions :
-        //    Activer IRQ 0 (Timer) et IRQ 1 (Clavier).
-        //    Désactiver (masquer) toutes les autres IRQs pour éviter les bruits parasites.
-        //    Bit à 0 = actif, bit à 1 = masqué.
-        //    0b1111_1100 = 0xFC (IRQ0 et IRQ1 démasqués)
+        // 6. Configure interrupt masks:
+        //    Unmask IRQ 0 (Timer) and IRQ 1 (Keyboard).
+        //    Mask all other IRQs to prevent spurious interrupts.
+        //    0 = unmasked (enabled), 1 = masked (disabled).
+        //    0b1111_1100 = 0xFC (IRQ0 and IRQ1 enabled)
         outb(PIC1_DATA, 0xFC);
-        outb(PIC2_DATA, 0xFF); // Toutes les IRQs esclaves masquées
+        outb(PIC2_DATA, 0xFF); // All slave IRQs masked
     }
 
-    crate::println!("[OK] PIC 8259 : Remappage termine (IRQs 32..47).");
+    crate::println!("[OK] PIC 8259  : Remapped successfully (IRQs 32..47).");
 }
 
-/// Signale au PIC que le traitement d'une interruption est terminé (End Of Interrupt).
+/// Signals the PIC that interrupt processing is complete (End Of Interrupt).
 ///
-/// Si l'interruption provient de l'Esclave (IRQ >= 8), il faut envoyer l'EOI
-/// à la fois à l'Esclave ET au Maître. Sinon, seulement au Maître.
+/// If the interrupt came from the Slave (IRQ >= 8), EOI must be sent
+/// to BOTH the Slave and the Master. Otherwise, only to the Master.
 pub fn send_eoi(irq: u8) {
     unsafe {
         if irq >= 8 {

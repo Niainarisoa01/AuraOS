@@ -1,31 +1,29 @@
 /// ============================================================================
-/// IDT — Table des Descripteurs d'Interruptions (Interrupt Descriptor Table)
+/// IDT — Interrupt Descriptor Table
 /// ============================================================================
 ///
-/// L'IDT est la table que le processeur consulte chaque fois qu'un événement
-/// matériel ou logiciel survient (exception CPU, frappe clavier, timer, etc.).
+/// The IDT is the table consulted by the CPU whenever an interrupt or exception occurs
+/// (CPU faults, keyboard keystrokes, timer ticks, system calls, etc.).
 ///
-/// Chaque entrée de l'IDT pointe vers une fonction Rust qui sera exécutée
-/// automatiquement par le processeur lors de l'interruption correspondante.
-///
-/// En x86_64, chaque entrée mesure 16 octets et contient l'adresse de la
-/// fonction de traitement (*handler*), le sélecteur de segment et les attributs.
+/// Each IDT entry points to a handler function executed automatically by the CPU.
+/// In x86_64, each entry is 16 bytes wide and contains the handler address,
+/// segment selector, and gate attributes.
 
-/// Structure d'une entrée IDT en mode 64 bits (16 octets).
+/// 16-byte IDT entry structure in 64-bit Long Mode.
 #[derive(Debug, Clone, Copy)]
 #[repr(C, packed)]
 pub struct IdtEntry {
-    offset_low: u16,       // Adresse du handler (bits 0-15)
-    selector: u16,         // Sélecteur de segment de code (0x08 = Ring 0)
-    ist: u8,               // Index de la pile d'interruptions (IST), 0 = pas d'IST
-    attributes: u8,        // Type, DPL, bit Present
-    offset_mid: u16,       // Adresse du handler (bits 16-31)
-    offset_high: u32,      // Adresse du handler (bits 32-63)
-    reserved: u32,         // Réservé, doit être zéro
+    offset_low: u16,       // Handler address (bits 0-15)
+    selector: u16,         // Code segment selector (0x08 = Ring 0 Kernel)
+    ist: u8,               // Interrupt Stack Table index (0 = disabled)
+    attributes: u8,        // Gate type, DPL, Present bit
+    offset_mid: u16,       // Handler address (bits 16-31)
+    offset_high: u32,      // Handler address (bits 32-63)
+    reserved: u32,         // Reserved by Intel/AMD, must be zero
 }
 
 impl IdtEntry {
-    /// Crée une entrée IDT vide (non configurée).
+    /// Creates an empty (unconfigured/missing) IDT entry.
     pub const fn missing() -> Self {
         IdtEntry {
             offset_low: 0,
@@ -38,153 +36,153 @@ impl IdtEntry {
         }
     }
 
-    /// Configure une entrée IDT pour pointer vers un handler donné.
-    ///   - `handler` : Adresse de la fonction de traitement (ISR).
-    ///   - `selector`: Sélecteur du segment de code (0x08 pour le code Ring 0).
-    ///   - `attributes`: 0x8E = Interrupt Gate, Present, DPL 0.
+    /// Configures an IDT entry to point to the given interrupt service routine (ISR).
+    ///   - `handler`: Address of the ISR function
+    ///   - Code selector is set to 0x08 (GDT Kernel Code Segment)
+    ///   - Attributes set to 0x8E (64-bit Interrupt Gate, Present, DPL 0)
     pub fn set_handler(&mut self, handler: u64) {
         self.offset_low = handler as u16;
         self.offset_mid = (handler >> 16) as u16;
         self.offset_high = (handler >> 32) as u32;
-        self.selector = 0x08;   // Segment de code noyau (GDT index 1)
+        self.selector = 0x08;   // Kernel code segment (GDT index 1)
         self.ist = 0;
-        self.attributes = 0x8E; // Interrupt Gate 64-bit, Present, DPL=0
+        self.attributes = 0x8E; // 64-bit Interrupt Gate, Present, DPL=0
         self.reserved = 0;
     }
 }
 
-/// Le pointeur IDTR que l'instruction `lidt` du processeur attend.
+/// The IDTR pointer structure expected by the `lidt` instruction.
 #[repr(C, packed)]
 pub struct IdtPointer {
     pub limit: u16,
     pub base: u64,
 }
 
-/// Nombre maximal d'entrées IDT supportées par x86_64.
+/// Maximum number of IDT entries supported by x86_64.
 const IDT_ENTRIES: usize = 256;
 
 use core::cell::UnsafeCell;
 
-/// Wrapper thread-safe pour notre table IDT
+/// Thread-safe wrapper for the static IDT table.
 struct IdtWrapper(UnsafeCell<[IdtEntry; IDT_ENTRIES]>);
 unsafe impl Sync for IdtWrapper {}
 
-/// Notre table IDT statique (256 entrées, toutes initialisées à « vide »).
+/// Static IDT table (256 entries, all initialized to empty).
 static IDT: IdtWrapper = IdtWrapper(UnsafeCell::new([IdtEntry::missing(); IDT_ENTRIES]));
 
 // ============================================================================
-// Structures sauvegardées par le CPU lors d'une interruption
+// CPU-Saved Interrupt Stack Frame
 // ============================================================================
 
-/// Le cadre d'interruption (*Interrupt Stack Frame*) est la structure que le
-/// processeur empile automatiquement sur la pile du noyau avant d'appeler
-/// notre handler. Elle contient l'état du code interrompu.
+/// The Interrupt Stack Frame is automatically pushed onto the kernel stack
+/// by the CPU prior to invoking an interrupt handler. It preserves the state
+/// of the interrupted execution context.
 #[derive(Debug)]
 #[repr(C)]
 pub struct InterruptStackFrame {
-    pub instruction_pointer: u64,    // RIP : l'adresse à laquelle le code s'exécutait
-    pub code_segment: u64,           // CS : le segment de code
-    pub cpu_flags: u64,              // RFLAGS : les drapeaux du processeur
-    pub stack_pointer: u64,          // RSP : le pointeur de pile
-    pub stack_segment: u64,          // SS : le segment de pile
+    pub instruction_pointer: u64,    // RIP: interrupted instruction pointer
+    pub code_segment: u64,           // CS: code segment selector
+    pub cpu_flags: u64,              // RFLAGS: processor status flags
+    pub stack_pointer: u64,          // RSP: stack pointer
+    pub stack_segment: u64,          // SS: stack segment selector
 }
 
 // ============================================================================
-// Handlers (Gestionnaires) pour les exceptions CPU critiques
+// Handlers for Critical CPU Exceptions
 // ============================================================================
 
-/// Exception 0 : Division par Zéro.
-/// Se produit quand le code tente de diviser un nombre par 0.
+/// Exception 0: Divide by Zero.
+/// Raised when code attempts to divide a number by zero.
 extern "x86-interrupt" fn divide_by_zero_handler(frame: InterruptStackFrame) {
-    crate::println!("\n[EXCEPTION] Division par zero !");
-    crate::println!("  RIP (Instruction fautive) : {:#x}", frame.instruction_pointer);
-    crate::println!("  Noyau arrete pour securite.");
+    crate::println!("\n[EXCEPTION] Division by Zero!");
+    crate::println!("  Faulting RIP : {:#x}", frame.instruction_pointer);
+    crate::println!("  Kernel halted for safety.");
     loop {}
 }
 
-/// Exception 6 : Opcode Invalide.
-/// Se produit quand le CPU rencontre une instruction qu'il ne comprend pas.
+/// Exception 6: Invalid Opcode.
+/// Raised when the processor encounters an unknown or undefined instruction.
 extern "x86-interrupt" fn invalid_opcode_handler(frame: InterruptStackFrame) {
-    crate::println!("\n[EXCEPTION] Opcode invalide (instruction inconnue) !");
-    crate::println!("  RIP : {:#x}", frame.instruction_pointer);
+    crate::println!("\n[EXCEPTION] Invalid Opcode (unknown instruction)!");
+    crate::println!("  Faulting RIP : {:#x}", frame.instruction_pointer);
     loop {}
 }
 
-/// Exception 8 : Double Faute.
-/// C'est la pire des exceptions : elle se produit quand une exception survient
-/// pendant le traitement d'une autre exception. Si elle n'est pas gérée,
-/// le processeur effectue un Triple Fault (= reboot brutal).
+/// Exception 8: Double Fault.
+/// Raised when an exception occurs while trying to invoke a prior exception handler.
+/// If unhandled, the processor escalates to a Triple Fault (instant reboot).
 extern "x86-interrupt" fn double_fault_handler(frame: InterruptStackFrame, _error_code: u64) -> ! {
-    crate::println!("\n[EXCEPTION CRITIQUE] DOUBLE FAULT !");
-    crate::println!("  RIP : {:#x}", frame.instruction_pointer);
-    crate::println!("  Le noyau ne peut pas continuer. Arret complet.");
+    crate::println!("\n[CRITICAL EXCEPTION] DOUBLE FAULT!");
+    crate::println!("  Faulting RIP : {:#x}", frame.instruction_pointer);
+    crate::println!("  Kernel cannot recover. System halted.");
     loop {}
 }
 
-/// Exception 13 : Faute de Protection Générale (GPF).
-/// Se produit lors d'une violation de privilège ou d'un accès mémoire illégal.
+/// Exception 13: General Protection Fault (GPF).
+/// Raised on privilege level violations or illegal memory access attempts.
 extern "x86-interrupt" fn general_protection_fault_handler(frame: InterruptStackFrame, error_code: u64) {
-    crate::println!("\n[EXCEPTION] General Protection Fault (GPF) !");
-    crate::println!("  Code erreur : {:#x}", error_code);
-    crate::println!("  RIP : {:#x}", frame.instruction_pointer);
+    crate::println!("\n[EXCEPTION] General Protection Fault (GPF)!");
+    crate::println!("  Error code   : {:#x}", error_code);
+    crate::println!("  Faulting RIP : {:#x}", frame.instruction_pointer);
     loop {}
 }
 
-/// Exception 14 : Faute de Page (Page Fault).
-/// Se produit quand le code accède à une adresse mémoire virtuelle non mappée.
+/// Exception 14: Page Fault.
+/// Raised when accessing an unmapped or protected virtual memory address.
 extern "x86-interrupt" fn page_fault_handler(frame: InterruptStackFrame, error_code: u64) {
-    // Le registre CR2 contient l'adresse virtuelle fautive
+    // Register CR2 holds the linear faulting address
     let cr2: u64;
     unsafe { core::arch::asm!("mov {}, cr2", out(reg) cr2, options(nostack, preserves_flags)) };
 
-    crate::println!("\n[EXCEPTION] Page Fault (acces memoire invalide) !");
-    crate::println!("  Adresse fautive (CR2) : {:#x}", cr2);
-    crate::println!("  Code erreur : {:#x}", error_code);
-    crate::println!("  RIP : {:#x}", frame.instruction_pointer);
+    crate::println!("\n[EXCEPTION] Page Fault (invalid memory access)!");
+    crate::println!("  Faulting Address (CR2) : {:#x}", cr2);
+    crate::println!("  Error Code             : {:#x}", error_code);
+    crate::println!("  Faulting RIP           : {:#x}", frame.instruction_pointer);
     loop {}
 }
 
 // ============================================================================
-// Handlers pour les Interruptions Matérielles (IRQs)
+// Hardware Interrupt Handlers (IRQs)
 // ============================================================================
 
-/// Compteur de « ticks » d'horloge système (déclenché environ 18.2 fois/sec par défaut).
+/// System timer tick counter (triggered ~18.2 times/sec by default via PIT).
 static TICKS: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
 
-/// IRQ 0 : Horloge système (Timer PIT 8254).
+/// IRQ 0: System Timer (8254 PIT).
 extern "x86-interrupt" fn timer_handler(_frame: InterruptStackFrame) {
     TICKS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
     crate::pic::send_eoi(crate::pic::IRQ_TIMER);
 }
 
-/// IRQ 1 : Frappe Clavier PS/2.
+/// IRQ 1: PS/2 Keyboard Keystroke.
 extern "x86-interrupt" fn keyboard_handler(_frame: InterruptStackFrame) {
     crate::keyboard::handle_interrupt();
     crate::pic::send_eoi(crate::pic::IRQ_KEYBOARD);
 }
 
-/// Retourne le nombre de ticks d'horloge écoulés depuis le démarrage.
+/// Returns the number of system timer ticks elapsed since boot.
 #[allow(dead_code)]
 pub fn ticks() -> u64 {
     TICKS.load(core::sync::atomic::Ordering::Relaxed)
 }
 
 // ============================================================================
-// Initialisation de l'IDT
+// IDT Initialization
 // ============================================================================
 
-/// Enregistre tous les handlers dans la table IDT et la charge dans le CPU.
+/// Registers exception and hardware interrupt handlers into the IDT,
+/// then loads the table into the CPU's IDTR register via `lidt`.
 pub fn init() {
     let idt = IDT.0.get();
     unsafe {
-        // Exceptions CPU (0..31)
+        // CPU Exceptions (0..31)
         (*idt)[0].set_handler(divide_by_zero_handler as *const () as u64);
         (*idt)[6].set_handler(invalid_opcode_handler as *const () as u64);
         (*idt)[8].set_handler(double_fault_handler as *const () as u64);
         (*idt)[13].set_handler(general_protection_fault_handler as *const () as u64);
         (*idt)[14].set_handler(page_fault_handler as *const () as u64);
 
-        // Interruptions Matérielles IRQs (32..47)
+        // Hardware IRQs (32..47)
         (*idt)[crate::pic::PIC1_OFFSET as usize + crate::pic::IRQ_TIMER as usize]
             .set_handler(timer_handler as *const () as u64);
         (*idt)[crate::pic::PIC1_OFFSET as usize + crate::pic::IRQ_KEYBOARD as usize]
@@ -202,5 +200,5 @@ pub fn init() {
         );
     }
 
-    crate::println!("[OK] IDT : 5 exceptions CPU + IRQ0 (Timer) + IRQ1 (Clavier) enregistrees.");
+    crate::println!("[OK] IDT       : 5 CPU exceptions + IRQ0 (Timer) + IRQ1 (Keyboard) active.");
 }

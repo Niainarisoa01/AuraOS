@@ -1,9 +1,9 @@
 /// ============================================================================
-/// Shell Interactif AuraOS — Terminal Bare-Metal
+/// AuraOS Interactive Shell — Bare-Metal Terminal
 /// ============================================================================
 ///
-/// Gère le buffer de saisie ligne par ligne et l'exécution des commandes
-/// saisies au clavier par l'utilisateur.
+/// Manages the line input buffer and parses/executes user commands
+/// entered via the PS/2 keyboard.
 
 use crate::vga_buffer::clear_screen;
 use crate::io::outb;
@@ -23,7 +23,7 @@ impl Shell {
         }
     }
 
-    /// Ajoute un caractère tapé au clavier dans le buffer.
+    /// Appends a typed ASCII character to the line buffer and prints it.
     pub fn push_char(&mut self, c: u8) {
         if self.length < BUFFER_MAX - 1 {
             self.buffer[self.length] = c;
@@ -32,7 +32,7 @@ impl Shell {
         }
     }
 
-    /// Efface le dernier caractère saisi.
+    /// Erases the last character from the buffer and screen.
     pub fn backspace(&mut self) {
         if self.length > 0 {
             self.length -= 1;
@@ -40,7 +40,7 @@ impl Shell {
         }
     }
 
-    /// Valide la ligne courante (touche Entrée) et exécute la commande.
+    /// Submits the current line (Enter key) and executes the parsed command.
     pub fn enter(&mut self) {
         crate::println!();
 
@@ -58,22 +58,22 @@ impl Shell {
         crate::print!("auraos> ");
     }
 
-    /// Analyse et exécute la commande demandée.
+    /// Parses and executes the requested command.
     fn execute(cmd: &str) {
         let mut parts = cmd.split_whitespace();
         let command = parts.next().unwrap_or("");
 
         match command {
             "help" => {
-                crate::println!("Commandes disponibles dans AuraOS v0.1.0 :");
-                crate::println!("  help        - Affiche cette aide");
-                crate::println!("  clear       - Efface l'ecran VGA");
-                crate::println!("  info        - Affiche les informations systeme et CPU");
-                crate::println!("  ticks       - Affiche le compteur de temps (PIT IRQ0)");
-                crate::println!("  manifeste   - Vision et feuille de route 10 ans d'AuraOS");
-                crate::println!("  calc <a+b>  - Calcule une addition simple");
-                crate::println!("  reboot      - Redemarre la machine");
-                crate::println!("  halt        - Met le processeur en veille prolongee");
+                crate::println!("Available commands in AuraOS v0.1.0:");
+                crate::println!("  help        - Display this help message");
+                crate::println!("  clear       - Clear the VGA screen");
+                crate::println!("  info        - Display system and CPU status");
+                crate::println!("  ticks       - Display system timer ticks (PIT IRQ0)");
+                crate::println!("  manifesto   - AuraOS 10-year roadmap & architecture vision");
+                crate::println!("  calc <a+b>  - Evaluate a simple addition");
+                crate::println!("  reboot      - Reset and restart the computer");
+                crate::println!("  halt        - Put the CPU into deep sleep");
             }
 
             "clear" => {
@@ -85,25 +85,25 @@ impl Shell {
                 crate::println!("                    AURA OPERATING SYSTEM                   ");
                 crate::println!("============================================================");
                 crate::println!("  Version        : v0.1.0 (Bare-Metal Prototype)");
-                crate::println!("  Architecture   : x86_64 Long Mode (64 bits pur Rust)");
-                crate::println!("  Pilote Video   : VGA Text Mode 80x25 Buffer 0xb8000");
-                crate::println!("  Controleur IRQ : Dual PIC 8259 remappe (32..47)");
-                crate::println!("  Protection     : GDT 64-bit + IDT 256 entrees");
-                crate::println!("  Clavier        : Pilote PS/2 (Set 1 Make/Break)");
-                crate::println!("  Ticks Horloge  : {}", crate::idt::ticks());
+                crate::println!("  Architecture   : x86_64 Long Mode (64-bit pure Rust)");
+                crate::println!("  Video Driver   : VGA Text Mode 80x25 (Buffer 0xb8000)");
+                crate::println!("  IRQ Controller : Dual 8259 PIC remapped (32..47)");
+                crate::println!("  Protection     : 64-bit GDT + 256-entry IDT");
+                crate::println!("  Keyboard       : PS/2 Driver (Set 1 Make/Break)");
+                crate::println!("  Timer Ticks    : {}", crate::idt::ticks());
                 crate::println!("============================================================");
             }
 
             "ticks" => {
-                crate::println!("Horloge systeme (IRQ0) : {} ticks", crate::idt::ticks());
+                crate::println!("System timer (IRQ0): {} ticks", crate::idt::ticks());
             }
 
-            "manifeste" => {
-                crate::println!("--- AURAOS : VISION ET OBJECTIFS SUR 10 ANS ---");
-                crate::println!("1. 100% Rust bare-metal : securite memoire garantie sans GC.");
-                crate::println!("2. Hyper-leger : noyau complet < 1 Mo.");
-                crate::println!("3. Micro-noyau modulaire avec drivers isoles.");
-                crate::println!("4. UI vectorielle fluide avec typographie moderne.");
+            "manifesto" | "manifeste" => {
+                crate::println!("--- AURAOS: 10-YEAR VISION & CORE PRINCIPLES ---");
+                crate::println!("1. 100% Pure Rust bare-metal: compile-time memory safety without GC.");
+                crate::println!("2. Ultra-lightweight: complete core kernel < 1 MB.");
+                crate::println!("3. Modular microkernel architecture with isolated Ring 3 drivers.");
+                crate::println!("4. Fluid vector graphics compositor with modern typography.");
                 crate::println!("------------------------------------------------");
             }
 
@@ -115,23 +115,23 @@ impl Shell {
                     if let (Ok(a), Ok(b)) = (parse_u64(left_str), parse_u64(right_str)) {
                         crate::println!("  {} + {} = {}", a, b, a + b);
                     } else {
-                        crate::println!("  Erreur : nombres invalides. Exemple: calc 15+27");
+                        crate::println!("  Error: invalid numbers. Example: calc 15+27");
                     }
                 } else {
-                    crate::println!("  Usage : calc <nombre>+<nombre>  (Exemple: calc 123+456)");
+                    crate::println!("  Usage: calc <number>+<number>  (Example: calc 123+456)");
                 }
             }
 
             "reboot" => {
-                crate::println!("Redemarrage d'AuraOS en cours...");
+                crate::println!("Restarting AuraOS...");
                 unsafe {
-                    // Impulsion de reset via le contrôleur clavier 8042 (port 0x64, commande 0xFE)
+                    // Pulse reset line via 8042 keyboard controller (port 0x64, command 0xFE)
                     outb(0x64, 0xFE);
                 }
             }
 
             "halt" => {
-                crate::println!("AuraOS est arrete. Processeur en veille prolongee.");
+                crate::println!("AuraOS halted. CPU entering deep sleep state.");
                 loop {
                     unsafe {
                         core::arch::asm!("cli; hlt", options(nomem, nostack, preserves_flags));
@@ -140,13 +140,13 @@ impl Shell {
             }
 
             _ => {
-                crate::println!("Commande inconnue : '{}'. Tapez 'help' pour la liste.", cmd);
+                crate::println!("Unknown command: '{}'. Type 'help' for a list.", cmd);
             }
         }
     }
 }
 
-/// Convertit une tranche de texte en u64 sans bibliothèque standard.
+/// Parses an ASCII numeric string slice into a u64 without standard library.
 fn parse_u64(s: &str) -> Result<u64, ()> {
     let s = s.trim();
     if s.is_empty() {
@@ -164,6 +164,6 @@ fn parse_u64(s: &str) -> Result<u64, ()> {
     Ok(acc)
 }
 
-/// Instance globale unique du Shell AuraOS protégée par Spinlock.
+/// Global singleton instance of the AuraOS Shell, synchronized with a Spinlock.
 pub static SHELL: crate::vga_buffer::Spinlock<Shell> =
     crate::vga_buffer::Spinlock::new(Shell::new());

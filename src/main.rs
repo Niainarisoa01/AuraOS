@@ -12,55 +12,57 @@ mod shell;
 
 use core::panic::PanicInfo;
 
+/// Entry point of the AuraOS kernel.
+/// Called by the bootloader in 64-bit Long Mode.
 #[unsafe(no_mangle)]
 pub extern "C" fn _start() -> ! {
     // ==========================================
-    // Phase de démarrage du noyau AuraOS
+    // AuraOS Kernel Boot Phase
     // ==========================================
     println!("============================================================");
-    println!("        AuraOS Kernel v0.1.0 - Demarrage en cours...        ");
+    println!("        AuraOS Kernel v0.1.0 - Booting Up...                ");
     println!("============================================================");
     println!();
 
-    // Étape 1 : Initialiser la GDT (segments mémoire)
+    // Step 1: Initialize the Global Descriptor Table (GDT)
     gdt::init();
-    println!("[OK] GDT       : Table Globale des Descripteurs chargee.");
+    println!("[OK] GDT       : Global Descriptor Table loaded.");
 
-    // Étape 2 : Initialiser et remapper le contrôleur PIC 8259
+    // Step 2: Initialize and remap the dual 8259 PIC controllers
     pic::init();
 
-    // Étape 3 : Initialiser l'IDT (table des interruptions et exceptions)
+    // Step 3: Initialize the Interrupt Descriptor Table (IDT)
     idt::init();
 
-    // Étape 4 : Activer les interruptions matérielles au niveau du CPU
+    // Step 4: Enable hardware interrupts at the CPU level
     unsafe { core::arch::asm!("sti", options(nomem, nostack)) };
-    println!("[OK] CPU       : Interruptions materielles activees (sti).");
+    println!("[OK] CPU       : Hardware interrupts enabled (sti).");
 
-    // Étape 5 : Rapport système
+    // Step 5: System status report
     println!();
-    println!("[OK] Mode      : x86_64 Bare-Metal Long Mode (64 bits)");
-    println!("[OK] Affichage : VGA 80x25 avec scrolling automatique");
-    println!("[OK] Clavier   : PS/2 actif (saisie en direct)");
+    println!("[OK] Mode      : x86_64 Bare-Metal Long Mode (64-bit)");
+    println!("[OK] Video     : VGA 80x25 text mode with auto-scrolling");
+    println!("[OK] Keyboard  : PS/2 driver active (direct typing)");
     println!();
     println!("------------------------------------------------------------");
-    println!("  AuraOS v0.1.0 pret. Console interactive active :");
+    println!("  AuraOS v0.1.0 ready. Interactive console active:");
     println!("------------------------------------------------------------");
     print!("auraos> ");
 
-    // Boucle d'attente basse consommation (HLT) :
-    // Le CPU se met en veille et ne se réveille que lorsqu'une
-    // interruption matérielle survient (timer ou frappe clavier).
+    // Low-power idle loop (HLT):
+    // The CPU halts and only wakes up when a hardware interrupt
+    // occurs (timer tick or keyboard keystroke).
     loop {
         unsafe { core::arch::asm!("hlt", options(nostack, preserves_flags)) };
     }
 }
 
-/// En cas de panique noyau, on affiche l'erreur à l'écran.
+/// Invoked on panic. Prints error message and halts CPU.
 #[panic_handler]
 fn panic(info: &PanicInfo) -> ! {
     println!();
     println!("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!");
-    println!("  KERNEL PANIC - AuraOS a rencontre une erreur fatale !");
+    println!("  KERNEL PANIC - AuraOS encountered a fatal error!");
     println!("  {}", info);
     println!("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!");
     loop {

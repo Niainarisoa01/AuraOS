@@ -1,31 +1,31 @@
 /// ============================================================================
-/// Pilote Clavier PS/2 (Scancode Set 1)
+/// PS/2 Keyboard Driver (Scancode Set 1)
 /// ============================================================================
 ///
-/// Le contrôleur de clavier PS/2 (Intel 8042) génère une interruption IRQ 1
-/// chaque fois qu'une touche est enfoncée ou relâchée.
+/// The PS/2 keyboard controller (Intel 8042) triggers an IRQ 1 interrupt
+/// whenever a key is pressed or released.
 ///
-/// Lorsqu'une touche est pressée : un « Make Code » est envoyé sur le port 0x60.
-/// Lorsqu'une touche est relâchée: un « Break Code » (Make Code | 0x80) est envoyé.
+/// When a key is pressed:  A "Make Code" is sent on port 0x60.
+/// When a key is released: A "Break Code" (Make Code | 0x80) is sent.
 
 use core::sync::atomic::{AtomicBool, Ordering};
 use crate::io::inb;
 
 const KEYBOARD_DATA_PORT: u16 = 0x60;
 
-/// État de la touche Majuscule (Shift gauche ou droit)
+/// Tracks whether Shift (Left or Right) is currently held down.
 static SHIFT_ACTIVE: AtomicBool = AtomicBool::new(false);
 
-/// Table de correspondance des scancodes PS/2 (Set 1) vers caractères ASCII (Minuscules)
+/// PS/2 (Set 1) scancode lookup table to lowercase ASCII characters.
 static SCANCODE_LOWER: [u8; 58] = [
     0,    27,  b'1', b'2', b'3', b'4', b'5', b'6', b'7', b'8', b'9', b'0', b'-', b'=', 8,   // 0x00 - 0x0E (8 = Backspace)
-    b'\t', b'q', b'w', b'e', b'r', b't', b'y', b'u', b'i', b'o', b'p', b'[', b']', b'\n',    // 0x0F - 0x1C
+    b'\t', b'q', b'w', b'e', b'r', b't', b'y', b'u', b'i', b'o', b'p', b'[', b']', b'\n',    // 0x0F - 0x1C (0x1C = Enter)
     0,    b'a', b's', b'd', b'f', b'g', b'h', b'j', b'k', b'l', b';', b'\'', b'`',           // 0x1D - 0x29
     0,    b'\\', b'z', b'x', b'c', b'v', b'b', b'n', b'm', b',', b'.', b'/', 0,              // 0x2A - 0x35
     b'*', 0,   b' ',                                                                           // 0x36 - 0x39 (0x39 = Space)
 ];
 
-/// Table de correspondance des scancodes PS/2 (Set 1) vers caractères ASCII (Majuscules)
+/// PS/2 (Set 1) scancode lookup table to uppercase / shifted ASCII characters.
 static SCANCODE_UPPER: [u8; 58] = [
     0,    27,  b'!', b'@', b'#', b'$', b'%', b'^', b'&', b'*', b'(', b')', b'_', b'+', 8,   // 0x00 - 0x0E
     b'\t', b'Q', b'W', b'E', b'R', b'T', b'Y', b'U', b'I', b'O', b'P', b'{', b'}', b'\n',    // 0x0F - 0x1C
@@ -34,22 +34,22 @@ static SCANCODE_UPPER: [u8; 58] = [
     b'*', 0,   b' ',                                                                           // 0x36 - 0x39
 ];
 
-/// Traite une frappe clavier lors d'une interruption IRQ 1.
+/// Handles a keyboard keystroke on IRQ 1 and forwards characters to the Shell.
 pub fn handle_interrupt() {
     let scancode = unsafe { inb(KEYBOARD_DATA_PORT) };
 
     match scancode {
-        // Shift gauche ou droit pressé
+        // Left or Right Shift pressed
         0x2A | 0x36 => {
             SHIFT_ACTIVE.store(true, Ordering::Relaxed);
         }
-        // Shift gauche ou droit relâché (Make Code | 0x80)
+        // Left or Right Shift released (Make Code | 0x80)
         0xAA | 0xB6 => {
             SHIFT_ACTIVE.store(false, Ordering::Relaxed);
         }
-        // Si le bit 7 est à 1, c'est un relâchement de touche qu'on ignore
+        // Key release event (bit 7 set) - ignore for now
         code if code & 0x80 != 0 => {}
-        // Touche enfoncée (Make Code valide)
+        // Valid key press (Make Code)
         code => {
             let index = code as usize;
             if index < SCANCODE_LOWER.len() {
@@ -61,15 +61,15 @@ pub fn handle_interrupt() {
                 };
 
                 match ascii {
-                    // Backspace (Retour arrière)
+                    // Backspace
                     8 => {
                         crate::shell::SHELL.lock().backspace();
                     }
-                    // Entrée (Exécuter la commande)
+                    // Enter key (submit command)
                     b'\n' => {
                         crate::shell::SHELL.lock().enter();
                     }
-                    // Caractère imprimable
+                    // Printable ASCII character
                     0x20..=0x7E => {
                         crate::shell::SHELL.lock().push_char(ascii);
                     }

@@ -1,13 +1,12 @@
 /// ============================================================================
-/// Communications avec les Ports d'Entrée/Sortie (I/O Ports x86)
+/// x86 Port-Mapped I/O Primitives
 /// ============================================================================
 ///
-/// L'architecture x86 dispose d'un espace d'adressage I/O distinct de la mémoire RAM.
-/// Pour communiquer avec les périphériques matériels de base (PIC, Clavier PS/2,
-/// Port Série, Horloge RTC, etc.), le processeur utilise les instructions assembleur
-/// `in` et `out`.
+/// The x86 architecture features a separate I/O address space from regular RAM.
+/// Low-level peripherals (such as the 8259 PIC, PS/2 Keyboard, Serial Port,
+/// and RTC Clock) are accessed using the CPU assembly instructions `in` and `out`.
 
-/// Écrit un octet (8 bits) sur un port I/O donné.
+/// Writes an 8-bit byte to the specified I/O port.
 #[inline]
 pub unsafe fn outb(port: u16, value: u8) {
     unsafe {
@@ -20,7 +19,7 @@ pub unsafe fn outb(port: u16, value: u8) {
     }
 }
 
-/// Lit un octet (8 bits) depuis un port I/O donné.
+/// Reads an 8-bit byte from the specified I/O port.
 #[inline]
 pub unsafe fn inb(port: u16) -> u8 {
     let value: u8;
@@ -35,10 +34,11 @@ pub unsafe fn inb(port: u16) -> u8 {
     value
 }
 
-/// Attente I/O minimale (~1 à 4 microsecondes).
+/// Minimal I/O delay (~1 to 4 microseconds).
 ///
-/// Écrire sur le port 0x80 (traditionnellement réservé aux cartes de diagnostic POST)
-/// est le standard pour réaliser ce délai sans effet secondaire.
+/// Writing to port 0x80 (traditionally reserved for POST diagnostic cards)
+/// gives slow hardware devices (like the legacy 8259 PIC) time to settle
+/// without any unwanted side effects.
 #[inline]
 pub unsafe fn io_wait() {
     unsafe {

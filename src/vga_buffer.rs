@@ -2,7 +2,7 @@ use core::fmt;
 use core::ptr::write_volatile;
 use core::sync::atomic::{AtomicBool, Ordering};
 
-/// Les 16 couleurs standard de la palette VGA x86.
+/// Standard 16 colors for the x86 VGA text palette.
 #[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
@@ -25,7 +25,7 @@ pub enum Color {
     White = 15,
 }
 
-/// Combine la couleur du texte (avant-plan) et la couleur du fond (arrière-plan).
+/// Combines foreground text color and background color into a single byte.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(transparent)]
 pub struct ColorCode(u8);
@@ -36,7 +36,7 @@ impl ColorCode {
     }
 }
 
-/// Représentation d'un caractère VGA à l'écran (2 octets : ASCII + Attribut couleur).
+/// Representation of a single VGA text character cell (2 bytes: ASCII + Color attribute).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(C)]
 struct ScreenChar {
@@ -44,17 +44,17 @@ struct ScreenChar {
     color_code: ColorCode,
 }
 
-/// Dimensions de l'écran VGA texte standard.
+/// Standard VGA text mode screen dimensions.
 const BUFFER_HEIGHT: usize = 25;
 const BUFFER_WIDTH: usize = 80;
 
-/// Tampon mémoire VGA pointant vers l'adresse matérielle `0xb8000`.
+/// VGA memory buffer pointing to physical video RAM at `0xb8000`.
 #[repr(transparent)]
 struct Buffer {
     chars: [[ScreenChar; BUFFER_WIDTH]; BUFFER_HEIGHT],
 }
 
-/// Le pilote d'écriture VGA qui gère le curseur, les couleurs et le défilement.
+/// VGA text writer managing the cursor position, color attributes, and scrolling.
 pub struct Writer {
     column_position: usize,
     color_code: ColorCode,
@@ -64,13 +64,13 @@ pub struct Writer {
 unsafe impl Send for Writer {}
 
 impl Writer {
-    /// Accès sécurisé au tampon matériel à l'exécution.
+    /// Safe runtime access to the volatile hardware video buffer.
     #[inline]
     fn buffer_mut(&mut self) -> &mut Buffer {
         unsafe { &mut *self.buffer }
     }
 
-    /// Écrit un seul octet (caractère ASCII ou saut de ligne).
+    /// Writes a single byte (ASCII character or newline).
     pub fn write_byte(&mut self, byte: u8) {
         match byte {
             b'\n' => self.new_line(),
@@ -97,7 +97,7 @@ impl Writer {
         }
     }
 
-    /// Écrit une chaîne de caractères complète.
+    /// Writes an entire string slice to the screen.
     pub fn write_string(&mut self, s: &str) {
         for byte in s.bytes() {
             match byte {
@@ -107,7 +107,7 @@ impl Writer {
         }
     }
 
-    /// Déplace toutes les lignes vers le haut d'un cran (Scrolling automatique).
+    /// Shifts all screen lines up by one row (hardware auto-scrolling).
     fn new_line(&mut self) {
         for row in 1..BUFFER_HEIGHT {
             for col in 0..BUFFER_WIDTH {
@@ -121,7 +121,7 @@ impl Writer {
         self.column_position = 0;
     }
 
-    /// Efface une ligne en la remplissant d'espaces vides.
+    /// Clears a specific row by filling it with blank space characters.
     fn clear_row(&mut self, row: usize) {
         let blank = ScreenChar {
             ascii_character: b' ',
@@ -134,7 +134,7 @@ impl Writer {
         }
     }
 
-    /// Efface l'ensemble de l'écran VGA et remet le curseur au début.
+    /// Clears the entire VGA screen and resets the cursor to top-left.
     pub fn clear_screen(&mut self) {
         for row in 0..BUFFER_HEIGHT {
             self.clear_row(row);
@@ -142,7 +142,7 @@ impl Writer {
         self.column_position = 0;
     }
 
-    /// Efface le dernier caractère saisi (touche Retour arrière / Backspace).
+    /// Erases the last printed character on the current row (Backspace key).
     pub fn backspace(&mut self) {
         if self.column_position > 0 {
             self.column_position -= 1;
@@ -158,14 +158,14 @@ impl Writer {
         }
     }
 
-    /// Change la couleur d'écriture courante.
+    /// Updates the active foreground and background text color.
     #[allow(dead_code)]
     pub fn set_color(&mut self, foreground: Color, background: Color) {
         self.color_code = ColorCode::new(foreground, background);
     }
 }
 
-/// Permet à notre `Writer` d'utiliser le formattage standard Rust (ex: `write!`, `format_args!`).
+/// Implements `core::fmt::Write` so the `Writer` can use standard Rust formatting macros.
 impl fmt::Write for Writer {
     fn write_str(&mut self, s: &str) -> fmt::Result {
         self.write_string(s);
@@ -174,7 +174,7 @@ impl fmt::Write for Writer {
 }
 
 // ============================================================================
-// Verrou Bare-Metal (Spinlock) pour la sécurité thread-safe / interruptions
+// Bare-Metal Spinlock for Thread-Safety and Interrupt Protection
 // ============================================================================
 
 pub struct Spinlock<T> {
@@ -223,7 +223,7 @@ impl<'a, T> Drop for SpinlockGuard<'a, T> {
     }
 }
 
-/// Instance globale et unique du pilote d'affichage VGA, protégée par Spinlock.
+/// Global singleton instance of the VGA text writer, synchronized with a Spinlock.
 pub static WRITER: Spinlock<Writer> = Spinlock::new(Writer {
     column_position: 0,
     color_code: ColorCode::new(Color::LightCyan, Color::Black),
@@ -231,7 +231,7 @@ pub static WRITER: Spinlock<Writer> = Spinlock::new(Writer {
 });
 
 // ============================================================================
-// Macros d'impression globales : print! et println! pour le noyau
+// Global Kernel Print Macros: print! and println!
 // ============================================================================
 
 #[macro_export]
@@ -251,12 +251,12 @@ pub fn _print(args: fmt::Arguments) {
     WRITER.lock().write_fmt(args).unwrap();
 }
 
-/// Supprime le dernier caractère affiché à l'écran.
+/// Erases the last character displayed on the screen.
 pub fn backspace() {
     WRITER.lock().backspace();
 }
 
-/// Efface complètement l'écran VGA.
+/// Clears the entire VGA screen buffer.
 pub fn clear_screen() {
     WRITER.lock().clear_screen();
 }
