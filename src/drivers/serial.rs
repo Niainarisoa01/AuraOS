@@ -1,13 +1,13 @@
-/// ============================================================================
-/// Serial Port Driver — 16550 UART (COM1)
-/// ============================================================================
-///
-/// The 16550 UART (Universal Asynchronous Receiver-Transmitter) is standard
-/// on x86 PCs and QEMU. It transmits text data byte-by-byte over a serial line.
-///
-/// This provides a robust debugging channel that works independently of the
-/// video graphics hardware. In QEMU, COM1 can be piped directly to stdout
-/// via `-serial stdio` or logged to a file.
+//! ============================================================================
+//! Serial Port Driver — 16550 UART (COM1)
+//! ============================================================================
+//!
+//! The 16550 UART (Universal Asynchronous Receiver-Transmitter) is standard
+//! on x86 PCs and QEMU. It transmits text data byte-by-byte over a serial line.
+//!
+//! This provides a robust debugging channel that works independently of the
+//! video graphics hardware. In QEMU, COM1 can be piped directly to stdout
+//! via `-serial stdio` or logged to a file.
 
 use core::fmt;
 use crate::arch::io::{inb, outb};
@@ -38,7 +38,7 @@ impl SerialPort {
 
             // 3. Set divisor to 1 (115200 baud):
             //    Base clock is 1.8432 MHz / 16 = 115200 Hz. Divisor = 1.
-            outb(self.port_base + 0, 0x01); // Divisor LSB
+            outb(self.port_base, 0x01); // Divisor LSB
             outb(self.port_base + 1, 0x00); // Divisor MSB
 
             // 4. Line Control: 8 data bits, no parity, 1 stop bit (8N1)

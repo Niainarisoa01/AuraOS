@@ -1,14 +1,14 @@
-/// ============================================================================
-/// PCI Bus Driver & Hardware Enumeration
-/// ============================================================================
-///
-/// The Peripheral Component Interconnect (PCI) bus allows the operating system
-/// to discover and configure hardware devices (VGA graphics, network cards,
-/// SATA/NVMe controllers, USB hosts, VirtIO devices, etc.).
-///
-/// Configuration access is performed via x86 I/O ports:
-/// - 0xCF8: PCI Configuration Address (CONFIG_ADDRESS)
-/// - 0xCFC: PCI Configuration Data (CONFIG_DATA)
+//! ============================================================================
+//! PCI Bus Driver & Hardware Enumeration
+//! ============================================================================
+//!
+//! The Peripheral Component Interconnect (PCI) bus allows the operating system
+//! to discover and configure hardware devices (VGA graphics, network cards,
+//! SATA/NVMe controllers, USB hosts, VirtIO devices, etc.).
+//!
+//! Configuration access is performed via x86 I/O ports:
+//! - 0xCF8: PCI Configuration Address (CONFIG_ADDRESS)
+//! - 0xCFC: PCI Configuration Data (CONFIG_DATA)
 
 use crate::arch::io::{inl, outl};
 use alloc::vec::Vec;

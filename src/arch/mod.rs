@@ -1,9 +1,9 @@
-/// ============================================================================
-/// x86_64 Architecture Layer
-/// ============================================================================
-///
-/// Encapsulates all CPU-level structures, registers, hardware interrupts,
-/// and low-level port I/O primitives.
+//! ============================================================================
+//! x86_64 Architecture Layer
+//! ============================================================================
+//!
+//! Encapsulates all CPU-level structures, registers, hardware interrupts,
+//! and low-level port I/O primitives.
 
 pub mod io;
 pub mod gdt;

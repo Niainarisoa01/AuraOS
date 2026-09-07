@@ -1,26 +1,27 @@
-/// ============================================================================
-/// Dynamic Memory Allocator — Bare-Metal Linked List Heap Allocator
-/// ============================================================================
-///
-/// Implements `core::alloc::GlobalAlloc` to enable dynamic heap allocations
-/// (`Box`, `Vec`, `String`, `format!`) in pure `#![no_std]` Rust without external crates.
-///
-/// Uses a First-Fit Linked List strategy with automatic coalescing (merging)
-/// of adjacent free blocks upon deallocation to prevent fragmentation.
+//! ============================================================================
+//! Dynamic Memory Allocator — Bare-Metal Linked List Heap Allocator
+//! ============================================================================
+//!
+//! Implements `core::alloc::GlobalAlloc` to enable dynamic heap allocations
+//! (`Box`, `Vec`, `String`, `format!`) in pure `#![no_std]` Rust without external crates.
+//!
+//! Uses a First-Fit Linked List strategy with automatic coalescing (merging)
+//! of adjacent free blocks upon deallocation to prevent fragmentation.
 
 use core::alloc::{GlobalAlloc, Layout};
+use core::cell::UnsafeCell;
 use core::ptr;
 use crate::sync::{Spinlock, SpinlockGuard};
 
-/// Total heap size: 512 KiB.
-pub const HEAP_SIZE: usize = 512 * 1024;
+/// Total heap size: 8 MiB (supports 1024x768 32-bit TrueColor canvas & collections).
+pub const HEAP_SIZE: usize = 8 * 1024 * 1024;
 
 /// Backing memory buffer for the kernel heap, aligned to 4096 bytes.
-#[allow(dead_code)]
 #[repr(align(4096))]
-struct HeapMemory([u8; HEAP_SIZE]);
+struct HeapMemory(UnsafeCell<[u8; HEAP_SIZE]>);
+unsafe impl Sync for HeapMemory {}
 
-static mut HEAP_STORAGE: HeapMemory = HeapMemory([0; HEAP_SIZE]);
+static HEAP_STORAGE: HeapMemory = HeapMemory(UnsafeCell::new([0; HEAP_SIZE]));
 
 /// Align an address upward to the given power-of-two alignment.
 fn align_up(addr: usize, align: usize) -> usize {
@@ -149,9 +150,15 @@ impl LinkedListAllocator {
             return Err(());
         }
 
-        let excess_size = region.end_addr() - alloc_end;
-        if excess_size > 0 && excess_size < core::mem::size_of::<ListNode>() {
-            // Cannot hold a ListNode in the remaining space
+        let excess_prefix = alloc_start - region.start_addr();
+        if excess_prefix > 0 && excess_prefix < core::mem::size_of::<ListNode>() {
+            // Cannot hold a ListNode in the prefix space
+            return Err(());
+        }
+
+        let excess_suffix = region.end_addr() - alloc_end;
+        if excess_suffix > 0 && excess_suffix < core::mem::size_of::<ListNode>() {
+            // Cannot hold a ListNode in the suffix space
             return Err(());
         }
 
@@ -165,11 +172,18 @@ impl LinkedListAllocator {
 
         if let Some((region, alloc_start)) = self.find_region(size, align) {
             let alloc_end = alloc_start + size;
-            let excess_size = region.end_addr() - alloc_end;
+            let excess_suffix = region.end_addr() - alloc_end;
+            let excess_prefix = alloc_start - region.start_addr();
 
-            if excess_size > 0 {
+            if excess_suffix > 0 {
                 unsafe {
-                    self.add_free_region(alloc_end, excess_size);
+                    self.add_free_region(alloc_end, excess_suffix);
+                }
+            }
+
+            if excess_prefix > 0 {
+                unsafe {
+                    self.add_free_region(region.start_addr(), excess_prefix);
                 }
             }
 
@@ -236,13 +250,13 @@ unsafe impl GlobalAlloc for LockedHeap {
 #[global_allocator]
 pub static ALLOCATOR: LockedHeap = LockedHeap::empty();
 
-/// Initializes the kernel heap with the dedicated 512 KiB static buffer.
+/// Initializes the kernel heap with the dedicated 8 MiB static buffer.
 pub fn init_heap() {
-    let heap_start = core::ptr::addr_of_mut!(HEAP_STORAGE) as usize;
+    let heap_start = HEAP_STORAGE.0.get() as usize;
     unsafe {
         ALLOCATOR.lock().init(heap_start, HEAP_SIZE);
     }
-    crate::println!("[OK] Heap      : 512 KiB Linked List Allocator initialized.");
+    crate::println!("[OK] Heap      : 8 MiB Linked List Allocator initialized.");
 }
 
 /// Returns the number of used heap bytes.

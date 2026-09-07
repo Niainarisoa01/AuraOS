@@ -1,15 +1,16 @@
-/// ============================================================================
-/// GDT — Global Descriptor Table
-/// ============================================================================
-///
-/// The GDT defines memory segments for the x86_64 processor.
-/// In 64-bit Long Mode, segmentation is mostly flattened, but remains mandatory
-/// for CPU privilege separation (Ring 0 Kernel vs. Ring 3 User space).
-///
-/// Our minimal GDT contains 3 entries:
-///   0. Null Descriptor (mandatory, can never be referenced)
-///   1. Kernel Code Segment (Ring 0, executable)
-///   2. Kernel Data Segment (Ring 0, read/write)
+//! ============================================================================
+//! GDT — Global Descriptor Table
+//! ============================================================================
+//!
+//! The GDT defines memory segments for the x86_64 processor.
+//! In 64-bit Long Mode, segmentation is mostly flattened, but remains mandatory
+//! for CPU privilege separation (Ring 0 Kernel vs. Ring 3 User space).
+//!
+//! Our minimal GDT contains 3 entries:
+//!   0. Null Descriptor (mandatory, can never be referenced)
+//!   1. Kernel Code Segment (Ring 0, executable)
+//!   2. Kernel Data Segment (Ring 0, read/write)
+//!
 
 /// Representation of an 8-byte GDT entry.
 #[derive(Debug, Clone, Copy)]
@@ -105,7 +106,7 @@ pub fn init() {
             "mov fs, ax",
             "mov gs, ax",
             "mov ss, ax",
-            options(nostack)
+            out("rax") _,
         );
     }
 }

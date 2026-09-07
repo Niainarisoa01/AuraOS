@@ -1,13 +1,13 @@
-/// ============================================================================
-/// IDT — Interrupt Descriptor Table
-/// ============================================================================
-///
-/// The IDT is the table consulted by the CPU whenever an interrupt or exception occurs
-/// (CPU faults, keyboard keystrokes, timer ticks, system calls, etc.).
-///
-/// Each IDT entry points to a handler function executed automatically by the CPU.
-/// In x86_64, each entry is 16 bytes wide and contains the handler address,
-/// segment selector, and gate attributes.
+//! ============================================================================
+//! IDT — Interrupt Descriptor Table
+//! ============================================================================
+//!
+//! The IDT is the table consulted by the CPU whenever an interrupt or exception occurs
+//! (CPU faults, keyboard keystrokes, timer ticks, system calls, etc.).
+//!
+//! Each IDT entry points to a handler function executed automatically by the CPU.
+//! In x86_64, each entry is 16 bytes wide and contains the handler address,
+//! segment selector, and gate attributes.
 
 use core::cell::UnsafeCell;
 
@@ -86,32 +86,44 @@ pub struct InterruptStackFrame {
 
 /// Exception 0: Divide-by-Zero (#DE).
 extern "x86-interrupt" fn divide_by_zero_handler(frame: InterruptStackFrame) {
+    crate::serial_println!("\n[FATAL CPU EXCEPTION] Divide by Zero (#DE) at RIP: {:#x}", frame.instruction_pointer);
     crate::println!("\n[FATAL CPU EXCEPTION] Divide by Zero (#DE)");
     crate::println!("  Faulting RIP: {:#x}", frame.instruction_pointer);
-    loop {}
+    loop {
+        unsafe { core::arch::asm!("hlt", options(nomem, nostack, preserves_flags)) };
+    }
 }
 
 /// Exception 6: Invalid Opcode (#UD).
 extern "x86-interrupt" fn invalid_opcode_handler(frame: InterruptStackFrame) {
+    crate::serial_println!("\n[FATAL CPU EXCEPTION] Invalid Opcode (#UD) at RIP: {:#x}", frame.instruction_pointer);
     crate::println!("\n[FATAL CPU EXCEPTION] Invalid Opcode (#UD)");
     crate::println!("  Faulting RIP: {:#x}", frame.instruction_pointer);
-    loop {}
+    loop {
+        unsafe { core::arch::asm!("hlt", options(nomem, nostack, preserves_flags)) };
+    }
 }
 
 /// Exception 8: Double Fault (#DF).
 extern "x86-interrupt" fn double_fault_handler(frame: InterruptStackFrame, error_code: u64) -> ! {
+    crate::serial_println!("\n[CRITICAL CPU EXCEPTION] Double Fault (#DF) Code: {:#x}, RIP: {:#x}", error_code, frame.instruction_pointer);
     crate::println!("\n[CRITICAL CPU EXCEPTION] Double Fault (#DF)");
     crate::println!("  Error Code  : {:#x}", error_code);
     crate::println!("  Faulting RIP: {:#x}", frame.instruction_pointer);
-    loop {}
+    loop {
+        unsafe { core::arch::asm!("hlt", options(nomem, nostack, preserves_flags)) };
+    }
 }
 
 /// Exception 13: General Protection Fault (#GP).
 extern "x86-interrupt" fn general_protection_fault_handler(frame: InterruptStackFrame, error_code: u64) {
+    crate::serial_println!("\n[FATAL CPU EXCEPTION] General Protection Fault (#GP) Code: {:#x}, RIP: {:#x}", error_code, frame.instruction_pointer);
     crate::println!("\n[FATAL CPU EXCEPTION] General Protection Fault (#GP)");
     crate::println!("  Error Code  : {:#x}", error_code);
     crate::println!("  Faulting RIP: {:#x}", frame.instruction_pointer);
-    loop {}
+    loop {
+        unsafe { core::arch::asm!("hlt", options(nomem, nostack, preserves_flags)) };
+    }
 }
 
 /// Exception 14: Page Fault (#PF).
@@ -120,11 +132,15 @@ extern "x86-interrupt" fn page_fault_handler(frame: InterruptStackFrame, error_c
     unsafe {
         core::arch::asm!("mov {}, cr2", out(reg) faulting_address, options(nomem, nostack, preserves_flags));
     }
+    crate::serial_println!("\n[FATAL CPU EXCEPTION] Page Fault (#PF) at Addr: {:#x}, Flags: {:#b}, RIP: {:#x}",
+        faulting_address, error_code, frame.instruction_pointer);
     crate::println!("\n[FATAL CPU EXCEPTION] Page Fault (#PF)");
     crate::println!("  Accessed Address (CR2) : {:#x}", faulting_address);
     crate::println!("  Error Code Flags       : {:#b}", error_code);
     crate::println!("  Faulting RIP           : {:#x}", frame.instruction_pointer);
-    loop {}
+    loop {
+        unsafe { core::arch::asm!("hlt", options(nomem, nostack, preserves_flags)) };
+    }
 }
 
 // ============================================================================

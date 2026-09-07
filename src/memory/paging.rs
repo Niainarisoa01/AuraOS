@@ -1,11 +1,11 @@
 #![allow(dead_code)]
 
-/// ============================================================================
-/// Memory Management — Physical/Virtual Addresses & x86_64 Paging
-/// ============================================================================
-///
-/// Provides abstractions for 64-bit virtual and physical memory addresses,
-/// 4-level page table representations, and CR3 control register manipulation.
+//! ============================================================================
+//! Memory Management — Physical/Virtual Addresses & x86_64 Paging
+//! ============================================================================
+//!
+//! Provides abstractions for 64-bit virtual and physical memory addresses,
+//! 4-level page table representations, and CR3 control register manipulation.
 
 /// Standard x86_64 physical and virtual page size (4 KiB = 4096 bytes).
 pub const PAGE_SIZE: usize = 4096;

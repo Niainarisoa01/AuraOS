@@ -1,11 +1,11 @@
-/// ============================================================================
-/// ATA / IDE Hard Disk PIO Mode Storage Driver
-/// ============================================================================
-///
-/// Implements 28-bit LBA PIO mode disk read and write operations on the
-/// Primary ATA / IDE bus (ports 0x1F0 - 0x1F7).
-///
-/// Standard Sector Size: 512 bytes.
+//! ============================================================================
+//! ATA / IDE Hard Disk PIO Mode Storage Driver
+//! ============================================================================
+//!
+//! Implements 28-bit LBA PIO mode disk read and write operations on the
+//! Primary ATA / IDE bus (ports 0x1F0 - 0x1F7).
+//!
+//! Standard Sector Size: 512 bytes.
 
 use crate::arch::io::{inb, inw, io_wait, outb, outw};
 
@@ -34,6 +34,9 @@ pub const SECTOR_SIZE: usize = 512;
 fn wait_drive_ready() -> Result<(), &'static str> {
     for _ in 0..100_000 {
         let status = unsafe { inb(ATA_COMMAND_STATUS) };
+        if status == 0xFF {
+            return Err("No ATA drive connected (floating bus 0xFF)");
+        }
         if (status & ATA_STATUS_ERR) != 0 {
             return Err("ATA hardware error status flag set");
         }
@@ -49,6 +52,9 @@ fn wait_drive_ready() -> Result<(), &'static str> {
 fn wait_drive_not_busy() -> Result<(), &'static str> {
     for _ in 0..100_000 {
         let status = unsafe { inb(ATA_COMMAND_STATUS) };
+        if status == 0xFF {
+            return Err("No ATA drive connected (floating bus 0xFF)");
+        }
         if (status & ATA_STATUS_BSY) == 0 {
             return Ok(());
         }

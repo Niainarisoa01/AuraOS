@@ -1,18 +1,18 @@
-/// ============================================================================
-/// 8259 PIC — Programmable Interrupt Controller (Dual 8259 PIC)
-/// ============================================================================
-///
-/// Standard x86 hardware uses two cascaded 8259 PIC chips to route
-/// hardware interrupt lines (IRQs) to the CPU:
-///   - Master (PIC 1): Ports 0x20 (command) and 0x21 (data / mask)
-///   - Slave  (PIC 2): Ports 0xA0 (command) and 0xA1 (data / mask)
-///
-/// At power-on, the BIOS maps IRQs 0-7 to CPU interrupt vectors 0x08-0x0F.
-/// However, in 64-bit protected mode, these vectors are reserved for critical
-/// CPU exceptions (e.g. Double Fault 0x08)!
-///
-/// Therefore, we MUST remap the PIC so that hardware interrupts are shifted
-/// beyond the CPU exceptions (vectors 32 to 47: 0x20 to 0x2F).
+//! ============================================================================
+//! 8259 PIC — Programmable Interrupt Controller (Dual 8259 PIC)
+//! ============================================================================
+//!
+//! Standard x86 hardware uses two cascaded 8259 PIC chips to route
+//! hardware interrupt lines (IRQs) to the CPU:
+//!   - Master (PIC 1): Ports 0x20 (command) and 0x21 (data / mask)
+//!   - Slave  (PIC 2): Ports 0xA0 (command) and 0xA1 (data / mask)
+//!
+//! At power-on, the BIOS maps IRQs 0-7 to CPU interrupt vectors 0x08-0x0F.
+//! However, in 64-bit protected mode, these vectors are reserved for critical
+//! CPU exceptions (e.g. Double Fault 0x08)!
+//!
+//! Therefore, we MUST remap the PIC so that hardware interrupts are shifted
+//! beyond the CPU exceptions (vectors 32 to 47: 0x20 to 0x2F).
 
 use super::io::{inb, io_wait, outb};
 

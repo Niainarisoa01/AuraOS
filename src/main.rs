@@ -3,6 +3,7 @@
 #![feature(abi_x86_interrupt)]
 
 extern crate alloc;
+use bootloader as _;
 
 // Core concurrency primitive
 mod sync;
@@ -13,6 +14,7 @@ mod drivers;
 mod memory;
 mod task;
 mod fs;
+pub mod gui;
 mod shell;
 mod tests;
 
@@ -52,9 +54,9 @@ pub extern "C" fn _start() -> ! {
     arch::idt::init();
     serial_println!("[OK] IDT loaded.");
 
-    // Step 4: Initialize the 512 KiB Dynamic Heap Allocator
+    // Step 4: Initialize the 8 MiB Dynamic Heap Allocator
     memory::allocator::init_heap();
-    serial_println!("[OK] 512 KiB Heap initialized.");
+    serial_println!("[OK] 8 MiB Heap initialized.");
 
     // Step 5: Verify dynamic allocations (Box, Vec, String)
     {
@@ -127,7 +129,7 @@ pub extern "C" fn _start() -> ! {
     // Step 12: System status report
     println!();
     println!("[OK] Mode      : x86_64 Bare-Metal Long Mode (64-bit)");
-    println!("[OK] Memory    : 512 KiB Heap, 4 KiB Paging abstractions");
+    println!("[OK] Memory    : 8 MiB Heap, 4 KiB Paging abstractions");
     println!("[OK] Filesystem: Virtual Inode VFS mounted at '/'");
     println!("[OK] Storage   : ATA / IDE PIO 28-bit driver active");
     println!("[OK] Serial    : COM1 UART at 0x3F8 (115200 baud)");
@@ -141,10 +143,11 @@ pub extern "C" fn _start() -> ! {
 
     serial_println!("AuraOS v0.1.0 interactive console ready.");
 
-    // Low-power idle loop (HLT):
-    // The CPU halts and only wakes up when a hardware interrupt
-    // occurs (timer tick or keyboard keystroke).
+    // Interactive kernel execution loop:
+    // Processes pending keyboard inputs and enters low-power sleep (HLT)
+    // until the next hardware interrupt (timer tick or keypress).
     loop {
+        drivers::keyboard::process_pending_keys();
         unsafe { core::arch::asm!("hlt", options(nostack, preserves_flags)) };
     }
 }
@@ -152,6 +155,12 @@ pub extern "C" fn _start() -> ! {
 /// Invoked on panic. Prints error message and halts CPU.
 #[panic_handler]
 fn panic(info: &PanicInfo) -> ! {
+    unsafe {
+        core::arch::asm!("cli", options(nomem, nostack));
+        // Safely force unlock output devices in case panic occurred inside print!
+        drivers::vga::WRITER.force_unlock();
+        drivers::serial::SERIAL1.force_unlock();
+    }
     serial_println!("\n[KERNEL PANIC] {}", info);
     println!();
     println!("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!");

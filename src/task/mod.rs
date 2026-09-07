@@ -1,13 +1,13 @@
-/// ============================================================================
-/// Kernel Multitasking & Task Context Switching (TCB & Scheduler)
-/// ============================================================================
-///
-/// Implements pure Rust cooperative multitasking with Task Control Blocks (TCB),
-/// stack allocation, round-robin scheduling, and assembly context switching.
-///
-/// In x86_64 Long Mode System V ABI:
-/// - Callee-saved registers: r15, r14, r13, r12, rbx, rbp, rflags
-/// - Context switch saves caller registers on current stack and restores target stack.
+//! ============================================================================
+//! Kernel Multitasking & Task Context Switching (TCB & Scheduler)
+//! ============================================================================
+//!
+//! Implements pure Rust cooperative multitasking with Task Control Blocks (TCB),
+//! stack allocation, round-robin scheduling, and assembly context switching.
+//!
+//! In x86_64 Long Mode System V ABI:
+//! - Callee-saved registers: r15, r14, r13, r12, rbx, rbp, rflags
+//! - Context switch saves caller registers on current stack and restores target stack.
 
 use alloc::boxed::Box;
 use alloc::vec;
@@ -57,28 +57,35 @@ impl Task {
         // Ensure 16-byte alignment
         let aligned_top = stack_top & !0xF;
 
-        // Construct initial stack frame for switch_context:
-        // [top - 8]:  RIP (entry_point)
-        // [top - 16]: R15 (0)
-        // [top - 24]: R14 (0)
-        // [top - 32]: R13 (0)
-        // [top - 40]: R12 (0)
-        // [top - 48]: RBX (0)
-        // [top - 56]: RBP (0)
-        // [top - 64]: RFLAGS (0x202 = Interrupts Enabled)
-        let frame_ptr = (aligned_top - 64) as *mut u64;
+        // System V ABI: at function entry, (RSP + 8) must be 16-byte aligned.
+        // After switch_context's `ret` pops RIP (8 bytes), RSP must be
+        // 16-byte aligned MINUS 8. We achieve this by placing an extra
+        // 8-byte alignment padding slot below the return address.
+        //
+        // Stack layout (growing downward):
+        // [top - 8]:  ABI alignment padding (0)             -> consumed by ret's effect
+        // [top - 16]: RIP (entry_point)                     -> popped by ret
+        // [top - 24]: RFLAGS (0x202 = Interrupts Enabled)   -> popped by popfq
+        // [top - 32]: RBP (0)                               -> popped by pop rbp
+        // [top - 40]: RBX (0)                               -> popped by pop rbx
+        // [top - 48]: R12 (0)                               -> popped by pop r12
+        // [top - 56]: R13 (0)                               -> popped by pop r13
+        // [top - 64]: R14 (0)                               -> popped by pop r14
+        // [top - 72]: R15 (0)                               -> popped by pop r15
+        let frame_ptr = (aligned_top - 72) as *mut u64;
         unsafe {
+            *frame_ptr.add(8) = 0;                           // ABI alignment padding
             *frame_ptr.add(7) = entry_point as usize as u64; // RIP
-            *frame_ptr.add(6) = 0;                           // R15
-            *frame_ptr.add(5) = 0;                           // R14
-            *frame_ptr.add(4) = 0;                           // R13
+            *frame_ptr.add(6) = 0x202;                       // RFLAGS (IF=1)
+            *frame_ptr.add(5) = 0;                           // RBP
+            *frame_ptr.add(4) = 0;                           // RBX
             *frame_ptr.add(3) = 0;                           // R12
-            *frame_ptr.add(2) = 0;                           // RBX
-            *frame_ptr.add(1) = 0;                           // RBP
-            *frame_ptr.add(0) = 0x202;                       // RFLAGS (IF=1)
+            *frame_ptr.add(2) = 0;                           // R13
+            *frame_ptr.add(1) = 0;                           // R14
+            *frame_ptr.add(0) = 0;                           // R15
         }
 
-        let initial_rsp = (aligned_top - 64) as usize;
+        let initial_rsp = (aligned_top - 72) as usize;
 
         Task {
             id,
@@ -213,36 +220,55 @@ pub fn spawn(name: &'static str, entry_point: extern "C" fn()) -> usize {
 
 /// Cooperatively yields execution to the next ready task.
 pub fn yield_now() {
-    let (old_rsp_ptr, new_rsp) = {
+    // Manually disable interrupts to keep them off through the context switch.
+    // This prevents the scheduler's Vec from being modified (e.g., by spawn()
+    // called from an interrupt) while we hold a raw pointer into it.
+    let interrupts_were_enabled = {
+        let rflags: u64;
+        unsafe {
+            core::arch::asm!("pushfq", "pop {}", "cli", out(reg) rflags);
+        }
+        (rflags & (1 << 9)) != 0
+    };
+
+    let result = {
         let mut sched = SCHEDULER.lock();
         if sched.tasks.len() < 2 {
-            return;
-        }
-
-        let curr_idx = sched.current;
-        sched.tasks[curr_idx].ticks += 1;
-
-        if let Some(next_idx) = sched.pick_next() {
-            if next_idx == curr_idx {
-                return;
-            }
-
-            if sched.tasks[curr_idx].state == TaskState::Running {
-                sched.tasks[curr_idx].state = TaskState::Ready;
-            }
-            sched.tasks[next_idx].state = TaskState::Running;
-            sched.current = next_idx;
-
-            let old_ptr = &mut sched.tasks[curr_idx].rsp as *mut usize;
-            let new_rsp = sched.tasks[next_idx].rsp;
-            (old_ptr, new_rsp)
+            None
         } else {
-            return;
+            let curr_idx = sched.current;
+
+            if let Some(next_idx) = sched.pick_next() {
+                if next_idx == curr_idx {
+                    None
+                } else {
+                    if sched.tasks[curr_idx].state == TaskState::Running {
+                        sched.tasks[curr_idx].state = TaskState::Ready;
+                    }
+                    sched.tasks[next_idx].state = TaskState::Running;
+                    sched.current = next_idx;
+
+                    let old_ptr = &mut sched.tasks[curr_idx].rsp as *mut usize;
+                    let new_rsp = sched.tasks[next_idx].rsp;
+                    Some((old_ptr, new_rsp))
+                }
+            } else {
+                None
+            }
         }
     };
 
-    unsafe {
-        switch_context(old_rsp_ptr, new_rsp);
+    if let Some((old_rsp_ptr, new_rsp)) = result {
+        unsafe {
+            switch_context(old_rsp_ptr, new_rsp);
+        }
+    }
+
+    // Restore interrupts after returning from context switch
+    if interrupts_were_enabled {
+        unsafe {
+            core::arch::asm!("sti", options(nomem, nostack));
+        }
     }
 }
 

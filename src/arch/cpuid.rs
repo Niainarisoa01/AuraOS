@@ -1,10 +1,10 @@
-/// ============================================================================
-/// CPUID & Hardware Feature Detection Driver
-/// ============================================================================
-///
-/// Queries processor capabilities and hardware features using the x86 `cpuid` instruction.
-/// Retrieves Vendor ID (e.g. "GenuineIntel", "AuthenticAMD"), Processor Brand String,
-/// and hardware feature flags (SSE, AVX, APIC, TSC, RDRAND).
+//! ============================================================================
+//! CPUID & Hardware Feature Detection Driver
+//! ============================================================================
+//!
+//! Queries processor capabilities and hardware features using the x86 `cpuid` instruction.
+//! Retrieves Vendor ID (e.g. "GenuineIntel", "AuthenticAMD"), Processor Brand String,
+//! and hardware feature flags (SSE, AVX, APIC, TSC, RDRAND).
 
 /// Result of a single `cpuid` instruction execution.
 #[derive(Debug, Clone, Copy)]
@@ -32,7 +32,7 @@ pub fn cpuid(eax: u32, ecx: u32) -> CpuidResult {
             inout("ecx") ecx => out_ecx,
             tmp_ebx = out(reg) out_ebx,
             out("edx") out_edx,
-            options(nomem, preserves_flags)
+            options(preserves_flags)
         );
     }
 

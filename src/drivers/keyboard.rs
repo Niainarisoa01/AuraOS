@@ -1,17 +1,31 @@
-/// ============================================================================
-/// PS/2 Keyboard Driver (Scancode Set 1)
-/// ============================================================================
-///
-/// The PS/2 keyboard controller (Intel 8042) triggers an IRQ 1 interrupt
-/// whenever a key is pressed or released.
-///
-/// When a key is pressed:  A "Make Code" is sent on port 0x60.
-/// When a key is released: A "Break Code" (Make Code | 0x80) is sent.
+//! ============================================================================
+//! PS/2 Keyboard Driver (Scancode Set 1)
+//! ============================================================================
+//!
+//! The PS/2 keyboard controller (Intel 8042) triggers an IRQ 1 interrupt
+//! whenever a key is pressed or released.
+//!
+//! When a key is pressed:  A "Make Code" is sent on port 0x60.
+//! When a key is released: A "Break Code" (Make Code | 0x80) is sent.
 
 use core::sync::atomic::{AtomicBool, Ordering};
 use crate::arch::io::inb;
+use crate::sync::Spinlock;
 
 const KEYBOARD_DATA_PORT: u16 = 0x60;
+const KEY_BUFFER_CAP: usize = 128;
+
+struct KeyRingBuffer {
+    data: [u8; KEY_BUFFER_CAP],
+    head: usize,
+    tail: usize,
+}
+
+static KEY_QUEUE: Spinlock<KeyRingBuffer> = Spinlock::new(KeyRingBuffer {
+    data: [0; KEY_BUFFER_CAP],
+    head: 0,
+    tail: 0,
+});
 
 /// Tracks whether Shift (Left or Right) is currently held down.
 static SHIFT_ACTIVE: AtomicBool = AtomicBool::new(false);
@@ -34,7 +48,7 @@ static SCANCODE_UPPER: [u8; 58] = [
     b'*', 0,   b' ',                                                                           // 0x36 - 0x39
 ];
 
-/// Handles a keyboard keystroke on IRQ 1 and forwards characters to the Shell.
+/// Handles a keyboard keystroke on IRQ 1 and enqueues the character without blocking.
 pub fn handle_interrupt() {
     let scancode = unsafe { inb(KEYBOARD_DATA_PORT) };
 
@@ -61,21 +75,48 @@ pub fn handle_interrupt() {
                 };
 
                 match ascii {
-                    // Backspace
-                    8 => {
-                        crate::shell::SHELL.lock().backspace();
-                    }
-                    // Enter key (submit command)
-                    b'\n' => {
-                        crate::shell::SHELL.lock().enter();
-                    }
-                    // Printable ASCII character
-                    0x20..=0x7E => {
-                        crate::shell::SHELL.lock().push_char(ascii);
+                    8 | b'\t' | b'\n' | 0x20..=0x7E => {
+                        let mut queue = KEY_QUEUE.lock();
+                        let tail = queue.tail;
+                        let next_tail = (tail + 1) % KEY_BUFFER_CAP;
+                        if next_tail != queue.head {
+                            queue.data[tail] = ascii;
+                            queue.tail = next_tail;
+                        }
                     }
                     _ => {}
                 }
             }
+        }
+    }
+}
+
+/// Drains and processes all enqueued keystrokes in regular thread context with interrupts enabled.
+pub fn process_pending_keys() {
+    loop {
+        let key = {
+            let mut queue = KEY_QUEUE.lock();
+            let head = queue.head;
+            if head == queue.tail {
+                None
+            } else {
+                let byte = queue.data[head];
+                queue.head = (head + 1) % KEY_BUFFER_CAP;
+                Some(byte)
+            }
+        };
+
+        match key {
+            Some(8) => {
+                crate::shell::SHELL.lock().backspace();
+            }
+            Some(b'\n') => {
+                crate::shell::SHELL.lock().enter();
+            }
+            Some(ascii) if (0x20..=0x7E).contains(&ascii) => {
+                crate::shell::SHELL.lock().push_char(ascii);
+            }
+            _ => break,
         }
     }
 }

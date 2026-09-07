@@ -1,9 +1,9 @@
-/// ============================================================================
-/// AuraOS Interactive Shell — Bare-Metal Terminal
-/// ============================================================================
-///
-/// Manages the line input buffer and parses/executes user commands
-/// entered via the PS/2 keyboard.
+//! ============================================================================
+//! AuraOS Interactive Shell — Bare-Metal Terminal
+//! ============================================================================
+//!
+//! Manages the line input buffer and parses/executes user commands
+//! entered via the PS/2 keyboard.
 
 use crate::drivers::vga::clear_screen;
 use crate::arch::io::outb;
@@ -88,10 +88,26 @@ impl Shell {
                 crate::println!("  write <f> <t> Write text content into a file");
                 crate::println!("  rm <name>   - Remove a file or directory entry");
                 crate::println!("  readsec <lba> Read 512-byte raw disk sector via ATA PIO");
+                crate::println!("  gui / desktop- Render and benchmark macOS-style Desktop UI");
                 crate::println!("  test        - Run automated kernel subsystem self-tests");
                 crate::println!("  reboot      - Reset and restart the computer");
                 crate::println!("  shutdown    - Power off the system / virtual machine");
                 crate::println!("  halt        - Put the CPU into deep sleep");
+            }
+
+            "gui" | "desktop" => {
+                crate::println!("--- AURAOS GRAPHICAL DESKTOP COMPOSITOR ---");
+                crate::println!("  Allocating 32-bit TrueColor Canvas (1024x768)...");
+                let mut canvas = crate::drivers::framebuffer::Canvas::new(1024, 768);
+                crate::gui::render_desktop(&mut canvas);
+                crate::println!("  [OK] macOS-style Desktop rendered successfully in RAM!");
+                crate::println!("       * Resolution  : 1024x768 x 32bpp TrueColor RGBA");
+                crate::println!("       * Top Bar     : Translucent glassmorphism with live CMOS RTC");
+                crate::println!("       * Window 1    : 'AuraShell' with traffic lights (red, yellow, green)");
+                crate::println!("       * Window 2    : 'Aura Files' with Inode VFS folder explorer");
+                crate::println!("       * Bottom Dock : Floating pill-shaped dock with 5 app badges");
+                crate::println!("       * Pixel Count : 786,432 pixels rasterized with alpha blending");
+                crate::println!("-------------------------------------------");
             }
 
             "clear" => {
@@ -110,7 +126,7 @@ impl Shell {
                 crate::println!("  Processor      : {} ({})", cpu.brand_str(), cpu.vendor_str());
                 crate::println!("  RTC Clock      : {:04}-{:02}-{:02} {:02}:{:02}:{:02} UTC", rtc.year, rtc.month, rtc.day, rtc.hour, rtc.minute, rtc.second);
                 crate::println!("  Memory Model   : 4-Level Paging (PML4 at {:#x})", cr3.as_u64());
-                crate::println!("  Heap Allocator : 512 KiB Linked List Allocator (Dynamic)");
+                crate::println!("  Heap Allocator : 8 MiB Linked List Allocator (Dynamic)");
                 crate::println!("  Serial Port    : COM1 (UART 16550 at 0x3F8, 115200 baud)");
                 crate::println!("  Video Driver   : VGA Text Mode 80x25 (Buffer 0xb8000)");
                 crate::println!("  IRQ Controller : Dual 8259 PIC remapped (32..47)");
@@ -386,25 +402,27 @@ impl Shell {
             }
 
             "test" | "selftest" => {
-                crate::println!("--- AURAOS AUTOMATED SUBSYSTEM SELF-TESTS ---");
+                crate::println!("============ AURAOS KERNEL SELF-TEST SUITE ============");
                 let results = crate::tests::run_all_tests();
-                let mut all_ok = true;
-                for res in &results {
+                let mut pass_count = 0u32;
+                let mut fail_count = 0u32;
+                for (i, res) in results.iter().enumerate() {
                     if res.passed {
-                        crate::println!("  [PASS] {}", res.name);
-                        crate::println!("         Detail: {}", res.detail);
+                        pass_count += 1;
+                        crate::println!("  [{:>2}/{}] PASS  {}", i + 1, results.len(), res.name);
                     } else {
-                        all_ok = false;
-                        crate::println!("  [FAIL] {}", res.name);
-                        crate::println!("         Detail: {}", res.detail);
+                        fail_count += 1;
+                        crate::println!("  [{:>2}/{}] FAIL  {}", i + 1, results.len(), res.name);
+                        crate::println!("         -> {}", res.detail);
                     }
                 }
-                if all_ok {
-                    crate::println!("Result: All {} tests passed successfully! System 100% OK.", results.len());
+                crate::println!("=======================================================");
+                if fail_count == 0 {
+                    crate::println!("  Result: {}/{} PASSED | System integrity: 100%% OK", pass_count, results.len());
                 } else {
-                    crate::println!("Result: One or more tests failed!");
+                    crate::println!("  Result: {}/{} PASSED, {} FAILED", pass_count, results.len(), fail_count);
                 }
-                crate::println!("----------------------------------------------");
+                crate::println!("=======================================================");
             }
 
             "reboot" => {

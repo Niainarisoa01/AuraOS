@@ -1,10 +1,10 @@
-/// ============================================================================
-/// AuraOS Virtual File System (VFS) & In-Memory RAM Disk (RAMFS)
-/// ============================================================================
-///
-/// Implements an Inode-based hierarchical Virtual File System in pure Rust.
-/// Provides directory navigation, file creation, reading, writing, and deletion
-/// without any external crates.
+//! ============================================================================
+//! AuraOS Virtual File System (VFS) & In-Memory RAM Disk (RAMFS)
+//! ============================================================================
+//!
+//! Implements an Inode-based hierarchical Virtual File System in pure Rust.
+//! Provides directory navigation, file creation, reading, writing, and deletion
+//! without any external crates.
 
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -113,8 +113,8 @@ impl Vfs {
             return Ok(self.current_inode);
         }
 
-        let (mut curr, path_to_parse) = if trimmed.starts_with('/') {
-            (0, &trimmed[1..])
+        let (mut curr, path_to_parse) = if let Some(stripped) = trimmed.strip_prefix('/') {
+            (0, stripped)
         } else {
             (self.current_inode, trimmed)
         };
@@ -268,20 +268,55 @@ impl Vfs {
         path
     }
 
-    /// Removes an entry from its parent directory.
+    /// Removes an entry from its parent directory and frees its resources.
+    /// For directories, recursively cleans up all children.
     pub fn remove_entry(&mut self, target_id: usize) -> Result<(), &'static str> {
         if target_id == 0 {
             return Err("Cannot remove root directory");
         }
 
+        // Recursively collect all descendant IDs to clean up
+        let mut to_clean = Vec::new();
+        self.collect_descendants(target_id, &mut to_clean);
+        to_clean.push(target_id);
+
+        // Remove target from parent's children list
         let parent_id = self.inodes[target_id].parent_id;
-        if let InodeKind::Directory { children } = &mut self.inodes[parent_id].kind {
-            if let Some(pos) = children.iter().position(|&id| id == target_id) {
-                children.remove(pos);
-                return Ok(());
+        if let InodeKind::Directory { children } = &mut self.inodes[parent_id].kind
+            && let Some(pos) = children.iter().position(|&id| id == target_id)
+        {
+            children.remove(pos);
+        } else {
+            return Err("Entry not found in parent");
+        }
+
+        // Free memory by clearing content/children of all removed inodes
+        for &id in &to_clean {
+            match &mut self.inodes[id].kind {
+                InodeKind::File { content } => {
+                    content.clear();
+                    content.shrink_to_fit();
+                }
+                InodeKind::Directory { children } => {
+                    children.clear();
+                    children.shrink_to_fit();
+                }
+            }
+            self.inodes[id].name.clear();
+            self.inodes[id].name.shrink_to_fit();
+        }
+
+        Ok(())
+    }
+
+    /// Recursively collects all descendant inode IDs of a directory.
+    fn collect_descendants(&self, node_id: usize, result: &mut Vec<usize>) {
+        if let InodeKind::Directory { children } = &self.inodes[node_id].kind {
+            for &child_id in children {
+                result.push(child_id);
+                self.collect_descendants(child_id, result);
             }
         }
-        Err("Entry not found in parent")
     }
 }
 

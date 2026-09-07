@@ -1,13 +1,13 @@
-/// ============================================================================
-/// CMOS Real-Time Clock (RTC) Driver
-/// ============================================================================
-///
-/// Reads the current hardware calendar date and time from the motherboard's
-/// battery-backed CMOS chip (Motorola MC146818 standard).
-///
-/// Accessed via I/O ports:
-///   - 0x70: CMOS Index / Address Register (Selects RTC register to read/write)
-///   - 0x71: CMOS Data Register
+//! ============================================================================
+//! CMOS Real-Time Clock (RTC) Driver
+//! ============================================================================
+//!
+//! Reads the current hardware calendar date and time from the motherboard's
+//! battery-backed CMOS chip (Motorola MC146818 standard).
+//!
+//! Accessed via I/O ports:
+//!   - 0x70: CMOS Index / Address Register (Selects RTC register to read/write)
+//!   - 0x71: CMOS Data Register
 
 use crate::arch::io::{inb, outb};
 
@@ -61,9 +61,11 @@ fn bcd_to_binary(val: u8) -> u8 {
 
 /// Reads the raw date and time values from CMOS.
 fn read_raw_rtc() -> DateTime {
-    // Wait until the RTC is not updating
-    while is_update_in_progress() {
+    // Wait until the RTC is not updating, with safety timeout
+    let mut timeout = 10_000;
+    while is_update_in_progress() && timeout > 0 {
         core::hint::spin_loop();
+        timeout -= 1;
     }
 
     let mut second = read_cmos_register(0x00);
@@ -89,14 +91,28 @@ fn read_raw_rtc() -> DateTime {
 
     // Convert 12-hour format to 24-hour format if needed (bit 1 is 0 for 12-hour mode)
     let is_24hr = (register_b & 0x02) != 0;
-    if !is_24hr && (hour & 0x80) != 0 {
-        hour = ((hour & 0x7F) + 12) % 24;
+    if !is_24hr {
+        let is_pm = (hour & 0x80) != 0;
+        let raw_hour = hour & 0x7F;
+        hour = match (is_pm, raw_hour) {
+            (false, 12) => 0,          // 12 AM -> 00:00
+            (true, 12) => 12,          // 12 PM -> 12:00
+            (true, h) => (h + 12) % 24,// 1 PM..11 PM -> 13:00..23:00
+            (false, h) => h % 24,      // 1 AM..11 AM -> 01:00..11:00
+        };
     }
 
     // Calculate complete 4-digit year
-    let full_year = if century > 0 && century <= 99 {
+    // Note: CMOS register 0x32 (century) is non-standard and may return garbage
+    // on some hardware. We only trust values in the plausible range 19..21.
+    let full_year = if century > 0 {
         let actual_century = if is_bcd { bcd_to_binary(century as u8) as u16 } else { century };
-        actual_century * 100 + year
+        if actual_century >= 19 && actual_century <= 21 {
+            actual_century * 100 + year
+        } else {
+            // Century register returned implausible value, use default
+            2000 + year
+        }
     } else {
         // Modern default: assumes 21st century (2000s)
         2000 + year
@@ -116,11 +132,12 @@ fn read_raw_rtc() -> DateTime {
 /// rollover glitches during a second transition.
 pub fn read_rtc() -> DateTime {
     let mut last = read_raw_rtc();
-    loop {
+    for _ in 0..5 {
         let current = read_raw_rtc();
         if current == last {
             return current;
         }
         last = current;
     }
+    last
 }

@@ -3,8 +3,11 @@ name = "aura-kernel"
 version = "0.1.0"
 edition = "2024"
 
-[lints.cargo]
-unused_dependencies = "allow"
+[[bin]]
+name = "aura-kernel"
+path = "src/main.rs"
+test = false
+bench = false
 
 [dependencies]
 bootloader = "0.9.23"

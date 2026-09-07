@@ -1,10 +1,10 @@
-/// ============================================================================
-/// x86 Port-Mapped I/O Primitives
-/// ============================================================================
-///
-/// The x86 architecture features a separate I/O address space from regular RAM.
-/// Low-level peripherals (such as the 8259 PIC, PS/2 Keyboard, Serial Port,
-/// and RTC Clock) are accessed using the CPU assembly instructions `in` and `out`.
+//! ============================================================================
+//! x86 Port-Mapped I/O Primitives
+//! ============================================================================
+//!
+//! The x86 architecture features a separate I/O address space from regular RAM.
+//! Low-level peripherals (such as the 8259 PIC, PS/2 Keyboard, Serial Port,
+//! and RTC Clock) are accessed using the CPU assembly instructions `in` and `out`.
 
 /// Writes an 8-bit byte to the specified I/O port.
 #[inline]

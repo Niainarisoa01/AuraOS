@@ -1,9 +1,9 @@
-/// ============================================================================
-/// VGA Text Mode Driver (80x25 Memory Mapped at 0xb8000)
-/// ============================================================================
-///
-/// Hardware text buffer driver managing characters, 16-color attributes,
-/// hardware scrolling, backspace handling, and global formatted print macros.
+//! ============================================================================
+//! VGA Text Mode Driver (80x25 Memory Mapped at 0xb8000)
+//! ============================================================================
+//!
+//! Hardware text buffer driver managing characters, 16-color attributes,
+//! hardware scrolling, backspace handling, and global formatted print macros.
 
 use core::fmt;
 use core::ptr::write_volatile;
@@ -118,7 +118,9 @@ impl Writer {
     fn new_line(&mut self) {
         for row in 1..BUFFER_HEIGHT {
             for col in 0..BUFFER_WIDTH {
-                let character = self.buffer_mut().chars[row][col];
+                let character = unsafe {
+                    core::ptr::read_volatile(&self.buffer_mut().chars[row][col])
+                };
                 unsafe {
                     write_volatile(&mut self.buffer_mut().chars[row - 1][col], character);
                 }

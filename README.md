@@ -107,7 +107,7 @@ Le noyau [`aura_kernel`](./aura_kernel) est un système d'exploitation x86_64 Lo
   * Ordonnanceur Round-Robin coopératif avec comptabilité CPU sur timer matériel PIT
 * **Gestionnaire de Mémoire :**
   * Pagination x86_64 à 4 niveaux (`CR3`, tables PML4, PDPT, PD, PT)
-  * Allocateur de mémoire de tas (Heap Allocator) de 512 Ko à liste chaînée avec fusion de blocs libres (*free coalescing*)
+  * Allocateur de mémoire de tas (Heap Allocator) de 8 Mo à liste chaînée avec fusion de blocs libres (*free coalescing*)
   * Support complet d'`extern crate alloc` (`Box`, `Vec`, `String`, `format!`)
 * **Système de Fichiers Virtuel (VFS) & RAMFS :**
   * Arborescence à Inodes en mémoire vive avec racine `/` pré-remplie (`/etc/hostname`, `/etc/version`, `/etc/motd`, `/docs/manifesto.txt`, `/bin`)
