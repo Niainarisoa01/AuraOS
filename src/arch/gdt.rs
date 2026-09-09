@@ -60,16 +60,17 @@ pub struct GdtPointer {
     pub base: u64,        // Linear base address of the GDT table
 }
 
-// Access byte constants
+// Access byte constants (with Accessed bit 0 set to 1 so CPU does not write to GDT)
 const ACCESS_PRESENT: u8 = 0b1000_0000;  // Segment is present in memory
 const ACCESS_RING0: u8 = 0b0000_0000;    // Privilege level 0 (Kernel)
-const ACCESS_CODE_SEG: u8 = 0b0001_1010; // Executable, readable code segment
-const ACCESS_DATA_SEG: u8 = 0b0001_0010; // Writable, readable data segment
+const ACCESS_CODE_SEG: u8 = 0b0001_1011; // Executable, readable code segment + Accessed bit
+const ACCESS_DATA_SEG: u8 = 0b0001_0011; // Writable, readable data segment + Accessed bit
 
 // Granularity flags
 const FLAG_LONG_MODE: u8 = 0b0010;       // 64-bit Long Mode flag (L-bit)
 
-/// Static GDT table with 3 entries.
+/// Static GDT table with 3 entries. Placed in .data so it is in writable memory.
+#[unsafe(link_section = ".data")]
 static GDT: [GdtEntry; 3] = [
     GdtEntry::null(),                                                                // 0x00: Null
     GdtEntry::new(ACCESS_PRESENT | ACCESS_RING0 | ACCESS_CODE_SEG, FLAG_LONG_MODE), // 0x08: Kernel Code Ring 0

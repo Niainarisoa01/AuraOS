@@ -54,8 +54,8 @@ impl Task {
         let stack = vec![0u8; STACK_SIZE].into_boxed_slice();
         let stack_top = stack.as_ptr() as usize + STACK_SIZE;
 
-        // Ensure 16-byte alignment
-        let aligned_top = stack_top & !0xF;
+        // Ensure 16-byte alignment of the initial frame (72 bytes total frame)
+        let aligned_top = (stack_top & !0xF) - 8;
 
         // System V ABI: at function entry, (RSP + 8) must be 16-byte aligned.
         // After switch_context's `ret` pops RIP (8 bytes), RSP must be
