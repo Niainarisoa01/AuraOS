@@ -208,6 +208,7 @@ macro_rules! println {
 pub fn _print(args: fmt::Arguments) {
     use core::fmt::Write;
     WRITER.lock().write_fmt(args).unwrap();
+    crate::drivers::serial::SERIAL1.lock().write_fmt(args).ok();
 }
 
 /// Erases the last character displayed on the screen.

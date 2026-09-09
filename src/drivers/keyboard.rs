@@ -53,6 +53,12 @@ pub fn handle_interrupt() {
     let scancode = unsafe { inb(KEYBOARD_DATA_PORT) };
 
     match scancode {
+        // Escape key pressed — signal GUI to exit if active
+        0x01 => {
+            if crate::gui::GUI_ACTIVE.load(Ordering::Relaxed) {
+                crate::gui::GUI_EXIT_REQUESTED.store(true, Ordering::Relaxed);
+            }
+        }
         // Left or Right Shift pressed
         0x2A | 0x36 => {
             SHIFT_ACTIVE.store(true, Ordering::Relaxed);
@@ -93,6 +99,41 @@ pub fn handle_interrupt() {
 
 /// Drains and processes all enqueued keystrokes in regular thread context with interrupts enabled.
 pub fn process_pending_keys() {
+    // 1. Process pending input from COM1 serial port
+    let mut serial_buf = [0u8; 16];
+    let mut serial_len = 0;
+    {
+        let serial = crate::drivers::serial::SERIAL1.lock();
+        while serial_len < serial_buf.len() {
+            if let Some(b) = serial.receive_byte() {
+                serial_buf[serial_len] = b;
+                serial_len += 1;
+            } else {
+                break;
+            }
+        }
+    }
+    for &b in &serial_buf[..serial_len] {
+        match b {
+            0x1B => {
+                if crate::gui::GUI_ACTIVE.load(Ordering::Relaxed) {
+                    crate::gui::GUI_EXIT_REQUESTED.store(true, Ordering::Relaxed);
+                }
+            }
+            8 | 0x7F => {
+                crate::shell::SHELL.lock().backspace();
+            }
+            b'\r' | b'\n' => {
+                crate::shell::SHELL.lock().enter();
+            }
+            ascii if (0x20..=0x7E).contains(&ascii) => {
+                crate::shell::SHELL.lock().push_char(ascii);
+            }
+            _ => {}
+        }
+    }
+
+    // 2. Process keystrokes from PS/2 Keyboard queue
     loop {
         let key = {
             let mut queue = KEY_QUEUE.lock();

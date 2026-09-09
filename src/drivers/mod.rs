@@ -17,3 +17,6 @@ pub mod cmos;
 pub mod pci;
 pub mod ata;
 pub mod framebuffer;
+pub mod bga;
+pub mod mouse;
+pub mod pit;

@@ -10,3 +10,5 @@ pub mod gdt;
 pub mod idt;
 pub mod pic;
 pub mod cpuid;
+pub mod syscall;
+pub mod ring3;

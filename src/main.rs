@@ -43,8 +43,6 @@ pub extern "C" fn _start() -> ! {
 
     // Step 1: Initialize the Global Descriptor Table (GDT)
     arch::gdt::init();
-    println!("[OK] GDT       : Global Descriptor Table loaded.");
-    serial_println!("[OK] GDT loaded.");
 
     // Step 2: Initialize and remap the dual 8259 PIC controllers
     arch::pic::init();
@@ -54,9 +52,23 @@ pub extern "C" fn _start() -> ! {
     arch::idt::init();
     serial_println!("[OK] IDT loaded.");
 
+    // Step 3a: Initialize PIT 8254 Timer at 100 Hz (preemptive scheduling)
+    drivers::pit::init();
+
+    // Step 3b: Initialize PS/2 Mouse auxiliary controller
+    drivers::mouse::init();
+    println!("[OK] Mouse     : PS/2 Mouse initialized (IRQ 12 active).");
+    serial_println!("[OK] PS/2 Mouse initialized.");
+
+    // Step 3c: Initialize x86_64 Native System Call Interface (syscall/sysret)
+    arch::syscall::init();
+
     // Step 4: Initialize the 8 MiB Dynamic Heap Allocator
     memory::allocator::init_heap();
     serial_println!("[OK] 8 MiB Heap initialized.");
+
+    // Step 4b: Initialize User Space Memory Manager
+    memory::user_space::init();
 
     // Step 5: Verify dynamic allocations (Box, Vec, String)
     {
@@ -148,7 +160,7 @@ pub extern "C" fn _start() -> ! {
     // until the next hardware interrupt (timer tick or keypress).
     loop {
         drivers::keyboard::process_pending_keys();
-        unsafe { core::arch::asm!("hlt", options(nostack, preserves_flags)) };
+        unsafe { core::arch::asm!("sti; hlt", options(nomem, nostack)); }
     }
 }
 

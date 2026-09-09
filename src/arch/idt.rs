@@ -51,6 +51,13 @@ impl IdtEntry {
         self.attributes = 0x8E; // 64-bit Interrupt Gate, Present, DPL=0
         self.reserved = 0;
     }
+
+    /// Configures an IDT entry with a specific IST (Interrupt Stack Table) index.
+    /// Used for critical exceptions like Double Fault that need a dedicated stack.
+    pub fn set_handler_with_ist(&mut self, handler: u64, ist_index: u8) {
+        self.set_handler(handler);
+        self.ist = ist_index & 0x7; // IST index is 3 bits (1-7, 0=disabled)
+    }
 }
 
 /// The IDTR pointer structure expected by the `lidt` instruction.
@@ -150,17 +157,25 @@ extern "x86-interrupt" fn page_fault_handler(frame: InterruptStackFrame, error_c
 /// System timer tick counter (triggered ~18.2 times/sec by default via PIT).
 static TICKS: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
 
-/// IRQ 0: System Timer (8254 PIT).
+/// IRQ 0: System Timer (8254 PIT) — drives preemptive multitasking.
 extern "x86-interrupt" fn timer_handler(_frame: InterruptStackFrame) {
     TICKS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
     crate::task::timer_tick();
     super::pic::send_eoi(super::pic::IRQ_TIMER);
+    // Attempt preemptive context switch if current task's quantum expired
+    crate::task::preempt_schedule();
 }
 
 /// IRQ 1: PS/2 Keyboard Keystroke.
 extern "x86-interrupt" fn keyboard_handler(_frame: InterruptStackFrame) {
     crate::drivers::keyboard::handle_interrupt();
     super::pic::send_eoi(super::pic::IRQ_KEYBOARD);
+}
+
+/// IRQ 12: PS/2 Mouse Event.
+extern "x86-interrupt" fn mouse_handler(_frame: InterruptStackFrame) {
+    crate::drivers::mouse::handle_interrupt();
+    super::pic::send_eoi(super::pic::IRQ_MOUSE);
 }
 
 /// Returns the number of system timer ticks elapsed since boot.
@@ -181,7 +196,8 @@ pub fn init() {
         // CPU Exceptions (0..31)
         (*idt)[0].set_handler(divide_by_zero_handler as *const () as u64);
         (*idt)[6].set_handler(invalid_opcode_handler as *const () as u64);
-        (*idt)[8].set_handler(double_fault_handler as *const () as u64);
+        // Double Fault uses IST1 from TSS — prevents Triple Fault on stack overflow
+        (*idt)[8].set_handler_with_ist(double_fault_handler as *const () as u64, 1);
         (*idt)[13].set_handler(general_protection_fault_handler as *const () as u64);
         (*idt)[14].set_handler(page_fault_handler as *const () as u64);
 
@@ -190,6 +206,8 @@ pub fn init() {
             .set_handler(timer_handler as *const () as u64);
         (*idt)[super::pic::PIC1_OFFSET as usize + super::pic::IRQ_KEYBOARD as usize]
             .set_handler(keyboard_handler as *const () as u64);
+        (*idt)[super::pic::PIC1_OFFSET as usize + super::pic::IRQ_MOUSE as usize]
+            .set_handler(mouse_handler as *const () as u64);
 
         let idt_ptr = IdtPointer {
             limit: (core::mem::size_of::<[IdtEntry; IDT_ENTRIES]>() - 1) as u16,
@@ -203,5 +221,5 @@ pub fn init() {
         );
     }
 
-    crate::println!("[OK] IDT       : 5 CPU exceptions + IRQ0 (Timer) + IRQ1 (Keyboard) active.");
+    crate::println!("[OK] IDT       : 5 CPU exceptions + IRQ0 (Timer) + IRQ1 (Keyboard) + IRQ12 (Mouse) active.");
 }

@@ -191,3 +191,104 @@ pub fn read_cr3() -> PhysAddr {
     }
     PhysAddr(value & 0x000F_FFFF_FFFF_F000)
 }
+
+/// Maps the 3 GiB .. 4 GiB PCI MMIO range (0xC000_0000..0xFFFF_FFFF)
+/// as a 1 GiB huge page in the active page table.
+///
+/// This provides direct virtual-to-physical identity access to the
+/// Bochs VGA linear framebuffer (at 0xFD000000) and PCI MMIO registers.
+pub fn map_mmio_pci_range() {
+    let cr3 = read_cr3();
+    let p4_ptr = cr3.as_u64() as *const u64;
+    unsafe {
+        let p4_entry0 = *p4_ptr;
+        if (p4_entry0 & page_flags::PRESENT) != 0 {
+            let p3_phys = p4_entry0 & 0x000F_FFFF_FFFF_F000;
+            // P3 is identity-mapped in the low memory region (0x1000..0x14000)
+            let p3_entry3_ptr = (p3_phys + 3 * 8) as *mut u64;
+            // 0xC000_0000 | PRESENT (1) | WRITABLE (2) | HUGE_PAGE (0x80)
+            *p3_entry3_ptr = 0xC000_0000 | page_flags::PRESENT | page_flags::WRITABLE | page_flags::HUGE_PAGE;
+
+            // Reload CR3 to flush the CPU Translation Lookaside Buffer (TLB)
+            flush_tlb();
+        }
+    }
+}
+
+/// Writes a new physical address to the CR3 control register, switching the active page table.
+#[inline]
+pub unsafe fn write_cr3(pml4_phys: PhysAddr) {
+    unsafe {
+        core::arch::asm!(
+            "mov cr3, {}",
+            in(reg) pml4_phys.as_u64(),
+            options(nostack, preserves_flags)
+        );
+    }
+}
+
+/// Flushes the Translation Lookaside Buffer (TLB) by reloading CR3.
+#[inline]
+pub fn flush_tlb() {
+    unsafe {
+        core::arch::asm!(
+            "mov rax, cr3",
+            "mov cr3, rax",
+            out("rax") _,
+            options(nostack, preserves_flags)
+        );
+    }
+}
+
+/// Translates a kernel virtual address to its physical address by walking
+/// the currently active page tables.
+///
+/// This is critical because the bootloader does NOT identity-map the kernel:
+/// e.g. virtual 0x100000 may map to physical 0x401000. Heap allocations
+/// are similarly offset, so `ptr as u64` is NOT the physical address.
+///
+/// The bootloader's page table structures (PML4, PDPT, PD, PT) are stored
+/// in low physical memory (~0x1000..0x5000) which IS identity-mapped,
+/// allowing us to dereference those physical addresses as virtual pointers.
+pub fn virt_to_phys(virt: u64) -> Option<u64> {
+    let cr3 = read_cr3().as_u64();
+    let p4_idx = ((virt >> 39) & 0x1FF) as usize;
+    let p3_idx = ((virt >> 30) & 0x1FF) as usize;
+    let p2_idx = ((virt >> 21) & 0x1FF) as usize;
+    let p1_idx = ((virt >> 12) & 0x1FF) as usize;
+
+    unsafe {
+        // Level 4: PML4 (at physical = virtual address, identity-mapped by bootloader)
+        let pml4 = cr3 as *const PageTable;
+        let p4e = (*pml4).entries[p4_idx];
+        if !p4e.is_present() { return None; }
+
+        // Level 3: PDPT
+        let pdpt_phys = p4e.addr().as_u64();
+        let pdpt = pdpt_phys as *const PageTable;
+        let p3e = (*pdpt).entries[p3_idx];
+        if !p3e.is_present() { return None; }
+        if (p3e.flags() & page_flags::HUGE_PAGE) != 0 {
+            // 1 GiB huge page
+            return Some(p3e.addr().as_u64() | (virt & 0x3FFF_FFFF));
+        }
+
+        // Level 2: Page Directory
+        let pd_phys = p3e.addr().as_u64();
+        let pd = pd_phys as *const PageTable;
+        let p2e = (*pd).entries[p2_idx];
+        if !p2e.is_present() { return None; }
+        if (p2e.flags() & page_flags::HUGE_PAGE) != 0 {
+            // 2 MiB huge page
+            return Some(p2e.addr().as_u64() | (virt & 0x1F_FFFF));
+        }
+
+        // Level 1: Page Table
+        let pt_phys = p2e.addr().as_u64();
+        let pt = pt_phys as *const PageTable;
+        let p1e = (*pt).entries[p1_idx];
+        if !p1e.is_present() { return None; }
+
+        Some(p1e.addr().as_u64() | (virt & 0xFFF))
+    }
+}

@@ -63,18 +63,20 @@ fn wait_drive_not_busy() -> Result<(), &'static str> {
     Err("ATA drive timeout waiting for BSY to clear")
 }
 
-/// Reads a single 512-byte sector from the primary master hard drive using 28-bit LBA.
+/// Reads a single 512-byte sector from the specified ATA drive (0 = Master, 1 = Slave) using 28-bit LBA.
 #[allow(dead_code)]
-pub fn read_sector(lba: u32, buffer: &mut [u8; SECTOR_SIZE]) -> Result<(), &'static str> {
+pub fn read_sector_drive(drive: u8, lba: u32, buffer: &mut [u8; SECTOR_SIZE]) -> Result<(), &'static str> {
     if lba > 0x0FFF_FFFF {
         return Err("LBA exceeds 28-bit addressing limit");
     }
 
+    let drive_head = if drive == 0 { 0xE0 } else { 0xF0 } | (((lba >> 24) & 0x0F) as u8);
+
     unsafe {
         wait_drive_not_busy()?;
 
-        // Select Master drive (0xE0) + top 4 bits of LBA
-        outb(ATA_DRIVE_SELECT, 0xE0 | (((lba >> 24) & 0x0F) as u8));
+        // Select drive + top 4 bits of LBA
+        outb(ATA_DRIVE_SELECT, drive_head);
         io_wait();
 
         // Transfer 1 sector
@@ -100,18 +102,26 @@ pub fn read_sector(lba: u32, buffer: &mut [u8; SECTOR_SIZE]) -> Result<(), &'sta
     Ok(())
 }
 
-/// Writes a single 512-byte sector to the primary master hard drive using 28-bit LBA.
+/// Reads a single 512-byte sector from the primary master hard drive (drive 0) using 28-bit LBA.
 #[allow(dead_code)]
-pub fn write_sector(lba: u32, buffer: &[u8; SECTOR_SIZE]) -> Result<(), &'static str> {
+pub fn read_sector(lba: u32, buffer: &mut [u8; SECTOR_SIZE]) -> Result<(), &'static str> {
+    read_sector_drive(0, lba, buffer)
+}
+
+/// Writes a single 512-byte sector to the specified ATA drive (0 = Master, 1 = Slave) using 28-bit LBA.
+#[allow(dead_code)]
+pub fn write_sector_drive(drive: u8, lba: u32, buffer: &[u8; SECTOR_SIZE]) -> Result<(), &'static str> {
     if lba > 0x0FFF_FFFF {
         return Err("LBA exceeds 28-bit addressing limit");
     }
 
+    let drive_head = if drive == 0 { 0xE0 } else { 0xF0 } | (((lba >> 24) & 0x0F) as u8);
+
     unsafe {
         wait_drive_not_busy()?;
 
-        // Select Master drive (0xE0) + top 4 bits of LBA
-        outb(ATA_DRIVE_SELECT, 0xE0 | (((lba >> 24) & 0x0F) as u8));
+        // Select drive + top 4 bits of LBA
+        outb(ATA_DRIVE_SELECT, drive_head);
         io_wait();
 
         // Transfer 1 sector
@@ -138,4 +148,10 @@ pub fn write_sector(lba: u32, buffer: &[u8; SECTOR_SIZE]) -> Result<(), &'static
     }
 
     Ok(())
+}
+
+/// Writes a single 512-byte sector to the primary master hard drive (drive 0) using 28-bit LBA.
+#[allow(dead_code)]
+pub fn write_sector(lba: u32, buffer: &[u8; SECTOR_SIZE]) -> Result<(), &'static str> {
+    write_sector_drive(0, lba, buffer)
 }

@@ -10,6 +10,10 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use crate::sync::Spinlock;
 
+use alloc::borrow::Cow;
+
+pub mod fat32;
+
 #[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FileType {
@@ -20,6 +24,10 @@ pub enum FileType {
 pub enum InodeKind {
     File { content: Vec<u8> },
     Directory { children: Vec<usize> },
+    ProcFile { generator: fn() -> Vec<u8> },
+    DevNull,
+    DevZero,
+    DevRandom,
 }
 
 #[allow(dead_code)]
@@ -39,6 +47,8 @@ impl Inode {
         match &self.kind {
             InodeKind::File { content } => content.len(),
             InodeKind::Directory { children } => children.len(),
+            InodeKind::ProcFile { .. } => 0,
+            InodeKind::DevNull | InodeKind::DevZero | InodeKind::DevRandom => 0,
         }
     }
 }
@@ -77,10 +87,12 @@ impl Vfs {
 
         self.current_inode = 0;
 
-        // Create standard system hierarchy: /etc, /docs, /bin
+        // Create standard system hierarchy: /etc, /docs, /bin, /proc, /dev
         let etc_id = self.mkdir_at(0, "etc").unwrap_or(0);
         let docs_id = self.mkdir_at(0, "docs").unwrap_or(0);
         let _bin_id = self.mkdir_at(0, "bin").unwrap_or(0);
+        let proc_id = self.mkdir_at(0, "proc").unwrap_or(0);
+        let dev_id = self.mkdir_at(0, "dev").unwrap_or(0);
 
         // Populate system configuration and documentation files
         let _ = self.create_file_at(etc_id, "hostname", b"auraos-baremetal");
@@ -103,6 +115,18 @@ impl Vfs {
                           3. Microkernel isolation with Ring 0/Ring 3.\n\
                           4. Zero legacy technical debt.\n";
         let _ = self.create_file_at(docs_id, "manifesto.txt", manifesto);
+
+        // Populate /proc dynamic system metrics
+        let _ = self.create_proc_file_at(proc_id, "uptime", proc_uptime_generator);
+        let _ = self.create_proc_file_at(proc_id, "meminfo", proc_meminfo_generator);
+        let _ = self.create_proc_file_at(proc_id, "cpuinfo", proc_cpuinfo_generator);
+        let _ = self.create_proc_file_at(proc_id, "tasks", proc_tasks_generator);
+
+        // Populate /dev virtual devices
+        let _ = self.create_device_file_at(dev_id, "null", InodeKind::DevNull);
+        let _ = self.create_device_file_at(dev_id, "zero", InodeKind::DevZero);
+        let _ = self.create_device_file_at(dev_id, "random", InodeKind::DevRandom);
+        let _ = self.create_device_file_at(dev_id, "urandom", InodeKind::DevRandom);
     }
 
     /// Resolves a path string starting from either root (if path starts with '/')
@@ -141,7 +165,7 @@ impl Vfs {
                     }
                     found
                 }
-                InodeKind::File { .. } => return Err("Not a directory in path"),
+                _ => return Err("Not a directory in path"),
             };
 
             match next {
@@ -236,14 +260,68 @@ impl Vfs {
                 }
                 Ok(list)
             }
-            InodeKind::File { .. } => Err("Not a directory"),
+            _ => Err("Not a directory"),
         }
     }
 
-    /// Reads content from the specified file Inode.
-    pub fn read_file(&self, file_id: usize) -> Result<&[u8], &'static str> {
+    /// Creates a dynamic procedural file with a generator function (e.g. /proc files).
+    pub fn create_proc_file_at(
+        &mut self,
+        parent_id: usize,
+        name: &str,
+        generator: fn() -> Vec<u8>,
+    ) -> Result<usize, &'static str> {
+        if !self.inodes[parent_id].is_dir() {
+            return Err("Parent is not a directory");
+        }
+        let new_id = self.inodes.len();
+        self.inodes.push(Inode {
+            id: new_id,
+            parent_id,
+            name: String::from(name),
+            kind: InodeKind::ProcFile { generator },
+        });
+
+        if let InodeKind::Directory { children } = &mut self.inodes[parent_id].kind {
+            children.push(new_id);
+        }
+
+        Ok(new_id)
+    }
+
+    /// Creates a virtual device file (e.g. /dev/null, /dev/zero, /dev/random).
+    pub fn create_device_file_at(
+        &mut self,
+        parent_id: usize,
+        name: &str,
+        kind: InodeKind,
+    ) -> Result<usize, &'static str> {
+        if !self.inodes[parent_id].is_dir() {
+            return Err("Parent is not a directory");
+        }
+        let new_id = self.inodes.len();
+        self.inodes.push(Inode {
+            id: new_id,
+            parent_id,
+            name: String::from(name),
+            kind,
+        });
+
+        if let InodeKind::Directory { children } = &mut self.inodes[parent_id].kind {
+            children.push(new_id);
+        }
+
+        Ok(new_id)
+    }
+
+    /// Reads content from the specified file Inode (static or dynamic pseudo-file).
+    pub fn read_file(&self, file_id: usize) -> Result<Cow<'_, [u8]>, &'static str> {
         match &self.inodes[file_id].kind {
-            InodeKind::File { content } => Ok(content.as_slice()),
+            InodeKind::File { content } => Ok(Cow::Borrowed(content.as_slice())),
+            InodeKind::ProcFile { generator } => Ok(Cow::Owned(generator())),
+            InodeKind::DevNull => Ok(Cow::Borrowed(&[])),
+            InodeKind::DevZero => Ok(Cow::Owned(alloc::vec![0u8; 64])),
+            InodeKind::DevRandom => Ok(Cow::Owned(dev_random_generator())),
             InodeKind::Directory { .. } => Err("Cannot read directory as file"),
         }
     }
@@ -301,6 +379,7 @@ impl Vfs {
                     children.clear();
                     children.shrink_to_fit();
                 }
+                _ => {}
             }
             self.inodes[id].name.clear();
             self.inodes[id].name.shrink_to_fit();
@@ -327,4 +406,65 @@ pub fn init() {
     let mut vfs = VFS.lock();
     vfs.init();
     crate::serial_println!("[VFS] Virtual File System & RAMFS mounted at '/' with {} inodes", vfs.inodes.len());
+}
+
+// ============================================================================
+// Dynamic Pseudo-File Generators (/proc and /dev)
+// ============================================================================
+
+fn proc_uptime_generator() -> Vec<u8> {
+    let ticks = crate::arch::idt::ticks();
+    // PIT tick rate is ~18.2 Hz (approx 55 ms per tick)
+    let seconds = ticks / 18;
+    let ms = (ticks % 18) * 55;
+    alloc::format!("uptime: {}.{:03} seconds ({} timer ticks)\n", seconds, ms, ticks).into_bytes()
+}
+
+fn proc_meminfo_generator() -> Vec<u8> {
+    alloc::format!(
+        "MemTotal:        8192 kB\n\
+         MemFree:         4096 kB\n\
+         HeapCapacity:    8192 kB (8 MiB Coalescing Allocator)\n\
+         PagingModel:     4-Level x86_64 Long Mode (PML4)\n"
+    ).into_bytes()
+}
+
+fn proc_cpuinfo_generator() -> Vec<u8> {
+    let cpu = crate::arch::cpuid::get_cpu_info();
+    alloc::format!(
+        "processor:       0\n\
+         vendor_id:       {}\n\
+         model name:      {}\n\
+         architecture:    x86_64 (64-bit Bare-Metal Long Mode)\n",
+        cpu.vendor_str(),
+        cpu.brand_str()
+    ).into_bytes()
+}
+
+fn proc_tasks_generator() -> Vec<u8> {
+    let sched = crate::task::SCHEDULER.lock();
+    let mut out = alloc::format!("{:<4} {:<18} {:<16} {:<10}\n", "PID", "NAME", "STATE", "TICKS");
+    out.push_str("------------------------------------------------------\n");
+    for task in &sched.tasks {
+        let state_str = match task.state {
+            crate::task::TaskState::Ready => alloc::format!("READY"),
+            crate::task::TaskState::Running => alloc::format!("RUNNING"),
+            crate::task::TaskState::Sleeping(w) => alloc::format!("SLEEP(tick={})", w),
+            crate::task::TaskState::Dead => alloc::format!("DEAD"),
+        };
+        out.push_str(&alloc::format!("{:<4} {:<18} {:<16} {:<10}\n", task.id, task.name, state_str, task.ticks));
+    }
+    out.into_bytes()
+}
+
+fn dev_random_generator() -> Vec<u8> {
+    let mut bytes = alloc::vec::Vec::with_capacity(32);
+    let mut seed = crate::arch::cpuid::rdtsc();
+    for _ in 0..32 {
+        seed ^= seed << 13;
+        seed ^= seed >> 7;
+        seed ^= seed << 17;
+        bytes.push((seed & 0xFF) as u8);
+    }
+    bytes
 }

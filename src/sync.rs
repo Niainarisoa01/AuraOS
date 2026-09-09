@@ -16,6 +16,7 @@ fn pushfq_and_cli() -> bool {
     let rflags: u64;
     unsafe {
         core::arch::asm!(
+            "nop",
             "pushfq",
             "pop {}",
             "cli",

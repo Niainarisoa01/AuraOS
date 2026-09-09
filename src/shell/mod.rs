@@ -70,9 +70,15 @@ impl Shell {
                 crate::println!("  help        - Display this help message");
                 crate::println!("  clear       - Clear the VGA screen");
                 crate::println!("  info        - Display system and CPU status");
+                crate::println!("  sysinfo     - Display PIT, TSS, and syscall subsystem metrics");
                 crate::println!("  cpu         - Display detailed CPUID processor features");
                 crate::println!("  pci / lspci - Enumerate and inspect PCI hardware devices");
                 crate::println!("  tasks / ps  - Display kernel tasks, states, and stack pointers");
+                crate::println!("  ipc [cmd]   - Inter-Process Communication (status, send, recv)");
+                crate::println!("  userdemo    - Spawn and benchmark Ring 3 user process");
+                crate::println!("  sleep <ms>  - Put current task to sleep for N milliseconds");
+                crate::println!("  spawn <name>- Spawn a background worker task");
+                crate::println!("  kill <id>   - Terminate a task by its numeric ID");
                 crate::println!("  yield       - Cooperatively yield CPU slice to background worker");
                 crate::println!("  time / date - Display hardware RTC calendar date & time");
                 crate::println!("  mem         - Display physical/virtual memory & heap usage");
@@ -88,6 +94,15 @@ impl Shell {
                 crate::println!("  write <f> <t> Write text content into a file");
                 crate::println!("  rm <name>   - Remove a file or directory entry");
                 crate::println!("  readsec <lba> Read 512-byte raw disk sector via ATA PIO");
+                crate::println!("  writesec <lba> <t> Write text into raw ATA disk sector");
+                crate::println!("  formatfat [lba] [sec] Format a FAT32 partition on ATA disk");
+                crate::println!("  mountfat [lba]        Mount an existing FAT32 volume");
+                crate::println!("  fatinfo               Display mounted FAT32 volume metrics");
+                crate::println!("  fatls [path]          List files/folders on FAT32 volume");
+                crate::println!("  fatcat <path>         Display contents of a FAT32 file");
+                crate::println!("  fatwrite <p> <text>   Write text to a persistent FAT32 file");
+                crate::println!("  fatmkdir <path>       Create a directory on FAT32 volume");
+                crate::println!("  fatrm <path>          Delete a file from FAT32 volume");
                 crate::println!("  gui / desktop- Render and benchmark macOS-style Desktop UI");
                 crate::println!("  test        - Run automated kernel subsystem self-tests");
                 crate::println!("  reboot      - Reset and restart the computer");
@@ -96,18 +111,16 @@ impl Shell {
             }
 
             "gui" | "desktop" => {
-                crate::println!("--- AURAOS GRAPHICAL DESKTOP COMPOSITOR ---");
-                crate::println!("  Allocating 32-bit TrueColor Canvas (1024x768)...");
-                let mut canvas = crate::drivers::framebuffer::Canvas::new(1024, 768);
-                crate::gui::render_desktop(&mut canvas);
-                crate::println!("  [OK] macOS-style Desktop rendered successfully in RAM!");
-                crate::println!("       * Resolution  : 1024x768 x 32bpp TrueColor RGBA");
-                crate::println!("       * Top Bar     : Translucent glassmorphism with live CMOS RTC");
-                crate::println!("       * Window 1    : 'AuraShell' with traffic lights (red, yellow, green)");
-                crate::println!("       * Window 2    : 'Aura Files' with Inode VFS folder explorer");
-                crate::println!("       * Bottom Dock : Floating pill-shaped dock with 5 app badges");
-                crate::println!("       * Pixel Count : 786,432 pixels rasterized with alpha blending");
-                crate::println!("-------------------------------------------");
+                crate::println!("--- AURAOS GRAPHICAL DESKTOP ---");
+                crate::println!("  Switching to BGA 1024x768x32bpp TrueColor mode...");
+                crate::println!("  Press ESC to return to the text shell.");
+                crate::println!("---");
+                crate::gui::run_interactive_desktop();
+                // Returned from GUI — reinitialize VGA text
+                crate::drivers::vga::clear_screen();
+                crate::println!("============================================================");
+                crate::println!("        AuraOS v0.1.0 — Returned to Text Console            ");
+                crate::println!("============================================================");
             }
 
             "clear" => {
@@ -169,17 +182,183 @@ impl Shell {
                 crate::println!("---------------------------------------");
             }
 
+            "sysinfo" => {
+                crate::println!("=== AURAOS SUBSYSTEM DIAGNOSTICS & METRICS ===");
+                // PIT 8254
+                crate::println!("[PIT 8254 Timer]");
+                crate::println!("  Target Frequency: {} Hz", crate::drivers::pit::TARGET_FREQUENCY);
+                crate::println!("  Actual Frequency: {} Hz", crate::drivers::pit::actual_frequency());
+                crate::println!("  Tick Interval   : {} ms", crate::drivers::pit::tick_interval_ms());
+                crate::println!("  Elapsed Ticks   : {}", crate::arch::idt::ticks());
+
+                // TSS
+                crate::println!("[Task State Segment (TSS)]");
+                let tss_active = crate::arch::gdt::TSS_LOADED.load(core::sync::atomic::Ordering::Relaxed);
+                crate::println!("  Loaded          : {}", if tss_active { "ACTIVE (Ring 0 / IST enabled)" } else { "NOT LOADED" });
+                crate::println!("  IST1 Stack Top  : {:#x}", crate::arch::gdt::tss_ist1());
+                crate::println!("  RSP0 Stack Top  : {:#x}", crate::arch::gdt::tss_rsp0());
+
+                // Syscall
+                crate::println!("[Native Syscall Interface]");
+                let sys_active = crate::arch::syscall::SYSCALL_CONFIGURED.load(core::sync::atomic::Ordering::Relaxed);
+                let sys_calls = crate::arch::syscall::SYSCALL_COUNT.load(core::sync::atomic::Ordering::Relaxed);
+                crate::println!("  Status          : {}", if sys_active { "CONFIGURED (Fast MSR syscall/sysret)" } else { "DISABLED" });
+                crate::println!("  Invocations     : {}", sys_calls);
+                crate::println!("  LSTAR Target    : {:#x}", crate::arch::syscall::read_lstar());
+
+                // Heap Memory
+                crate::println!("[Heap Memory]");
+                crate::println!("  Used Memory     : {} bytes", crate::memory::allocator::used_memory());
+                crate::println!("==============================================");
+            }
+
             "tasks" | "ps" => {
                 let sched = crate::task::SCHEDULER.lock();
                 let count = crate::task::SENTINEL_HEARTBEATS.load(core::sync::atomic::Ordering::SeqCst);
                 crate::println!("--- AURAOS KERNEL TASK SCHEDULER ---");
-                crate::println!("PID  NAME               STATE     TICKS      RSP");
+                crate::println!("PID  NAME               RING   STATE           PRIO QUANTUM    TICKS      RSP");
                 for task in &sched.tasks {
-                    crate::println!("{:<4} {:<18} {:<9} {:<10} {:#x}",
-                        task.id, task.name, task.state.as_str(), task.ticks, task.rsp);
+                    let state_str = match task.state {
+                        crate::task::TaskState::Ready => alloc::format!("READY"),
+                        crate::task::TaskState::Running => alloc::format!("RUNNING"),
+                        crate::task::TaskState::Sleeping(w) => alloc::format!("SLEEP({})", w),
+                        crate::task::TaskState::Dead => alloc::format!("DEAD"),
+                    };
+                    let ring_str = if task.is_user { "RING 3" } else { "RING 0" };
+                    crate::println!("{:<4} {:<18} {:<6} {:<15} {:<4} {}/{:<6} {:<10} {:#x}",
+                        task.id, task.name, ring_str, state_str, task.priority, task.quantum_remaining, task.quantum, task.ticks, task.rsp);
                 }
                 crate::println!("Sentinel Heartbeats sent: {}", count);
                 crate::println!("-----------------------------------");
+            }
+
+            "ipc" => {
+                let sub = parts.next().unwrap_or("status");
+                match sub {
+                    "send" => {
+                        let target_str = parts.next().unwrap_or("0");
+                        let target = parse_u64(target_str).unwrap_or(0) as usize;
+                        let text_parts: alloc::vec::Vec<&str> = parts.collect();
+                        let text = text_parts.join(" ");
+                        let my_pid = {
+                            let sched = crate::task::SCHEDULER.lock();
+                            sched.tasks[sched.current].id
+                        };
+                        if crate::task::ipc::send_message(my_pid, target, 1, text.as_bytes()) {
+                            crate::println!("IPC: Sent {} bytes to PID {}", text.len(), target);
+                        } else {
+                            crate::println!("IPC: Failed to send (mailbox full or target invalid)");
+                        }
+                    }
+                    "recv" => {
+                        let my_pid = {
+                            let sched = crate::task::SCHEDULER.lock();
+                            sched.tasks[sched.current].id
+                        };
+                        if let Some(msg) = crate::task::ipc::receive_message(my_pid) {
+                            let p_len = msg.length as usize;
+                            let text = core::str::from_utf8(&msg.payload[..p_len]).unwrap_or("<binary data>");
+                            crate::println!("IPC Message received from PID {}: '{}' (type {})", msg.sender, text, msg.msg_type);
+                        } else {
+                            crate::println!("IPC: Mailbox empty for PID {}", my_pid);
+                        }
+                    }
+                    _ => {
+                        let (sent, deliv, active) = crate::task::ipc::stats();
+                        crate::println!("--- AURAOS IPC ROUTER STATUS ---");
+                        crate::println!("  Total Messages Sent     : {}", sent);
+                        crate::println!("  Total Messages Delivered: {}", deliv);
+                        crate::println!("  Active Mailboxes        : {}", active);
+                        crate::println!("  Commands: ipc send <pid> <text> | ipc recv");
+                        crate::println!("--------------------------------");
+                    }
+                }
+            }
+
+            "userdemo" => {
+                crate::println!("--- AURAOS RING 3 USER SPACE DEMO ---");
+                crate::println!("  1. Allocating isolated per-process AddressSpace (PML4)...");
+                if let Some(mut space) = crate::memory::user_space::AddressSpace::new() {
+                    crate::println!("     [OK] User PML4 root allocated at {:#x}", space.pml4_phys().as_u64());
+
+                    let user_code_virt = crate::memory::paging::VirtAddr(0x0000_0000_4000_0000);
+                    let user_stack_top = crate::memory::paging::VirtAddr(0x0000_0000_8000_0000);
+
+                    crate::println!("  2. Mapping User Code at {:#x} (USER_ACCESSIBLE)...", user_code_virt.as_u64());
+                    // Minimal x86_64 machine code that performs syscalls in Ring 3:
+                    // 1. mov rax, 39 (SYS_GETPID); syscall;
+                    // 2. mov rax, 24 (SYS_YIELD); syscall;
+                    // 3. mov rax, 1 (SYS_EXIT); xor rdi, rdi; syscall;
+                    let code: [u8; 30] = [
+                        0x48, 0xc7, 0xc0, 0x27, 0x00, 0x00, 0x00, // mov rax, 39 (SYS_GETPID)
+                        0x0f, 0x05,                               // syscall
+                        0x48, 0xc7, 0xc0, 0x18, 0x00, 0x00, 0x00, // mov rax, 24 (SYS_YIELD)
+                        0x0f, 0x05,                               // syscall
+                        0x48, 0xc7, 0xc0, 0x01, 0x00, 0x00, 0x00, // mov rax, 1 (SYS_EXIT)
+                        0x48, 0x31, 0xff,                         // xor rdi, rdi
+                        0x0f, 0x05,                               // syscall
+                    ];
+                    let code_ok = space.allocate_user_code(user_code_virt, &code);
+                    crate::println!("     [OK] User code mapped: {}", code_ok);
+
+                    crate::println!("  3. Mapping User Stack at {:#x} (16 KiB, USER_ACCESSIBLE)...", user_stack_top.as_u64());
+                    let stack_ok = space.allocate_user_stack(user_stack_top, 4);
+                    crate::println!("     [OK] User stack mapped: {}", stack_ok);
+
+                    crate::println!("  4. Validating CPU Ring 3 iretq frame (CS={:#x}, SS={:#x}, RFLAGS=0x202)...",
+                        crate::arch::gdt::USER_CS, crate::arch::gdt::USER_DS);
+                    let (cs_ok, ss_ok, rflags_ok) = crate::arch::ring3::validate_ring3_frame(
+                        crate::arch::gdt::USER_CS,
+                        crate::arch::gdt::USER_DS,
+                        0x202,
+                    );
+                    crate::println!("     [OK] Ring 3 selectors: CS={} ({:#x}), SS={} ({:#x}), IF={}",
+                        cs_ok, crate::arch::gdt::USER_CS, ss_ok, crate::arch::gdt::USER_DS, rflags_ok);
+
+                    crate::println!("  5. Spawning Ring 3 User Process in scheduler...");
+                    let pid = crate::task::spawn_user(
+                        "user-app-demo",
+                        user_code_virt.as_u64(),
+                        user_stack_top.as_u64(),
+                        space.pml4_phys().as_u64(),
+                    );
+                    core::mem::forget(space); // Keep address space allocated for the task
+                    crate::println!("     [OK] User process PID {} spawned in Ring 3!", pid);
+                } else {
+                    crate::println!("  [FAIL] Could not allocate user address space");
+                }
+                crate::println!("--------------------------------------");
+            }
+
+            "sleep" => {
+                let ms_str = parts.next().unwrap_or("1000");
+                let ms = parse_u64(ms_str).unwrap_or(1000);
+                crate::println!("Sleeping for {} ms...", ms);
+                crate::task::sleep_ms(ms);
+                crate::println!("Woke up!");
+            }
+
+            "spawn" => {
+                let name = parts.next().unwrap_or("worker");
+                let static_name: &'static str = alloc::boxed::Box::leak(alloc::string::String::from(name).into_boxed_str());
+                let tid = crate::task::spawn(static_name, crate::task::demo_worker_entry);
+                crate::println!("Spawned background worker task '{}' with PID {}", name, tid);
+            }
+
+            "kill" => {
+                if let Some(id_str) = parts.next() {
+                    if let Ok(id) = parse_u64(id_str) {
+                        if crate::task::kill_task(id as usize) {
+                            crate::println!("Task PID {} terminated.", id);
+                        } else {
+                            crate::println!("kill: cannot kill task PID {} (not found, already dead, or root shell)", id);
+                        }
+                    } else {
+                        crate::println!("kill: invalid PID: {}", id_str);
+                    }
+                } else {
+                    crate::println!("Usage: kill <pid>");
+                }
             }
 
             "yield" => {
@@ -305,7 +484,7 @@ impl Shell {
                     match vfs.resolve_path(path) {
                         Ok(file_id) => match vfs.read_file(file_id) {
                             Ok(bytes) => {
-                                if let Ok(text) = core::str::from_utf8(bytes) {
+                                if let Ok(text) = core::str::from_utf8(&bytes) {
                                     crate::println!("{}", text);
                                 } else {
                                     crate::println!("<Binary content: {} bytes>", bytes.len());
@@ -398,6 +577,179 @@ impl Shell {
                         crate::println!("--------------------------------------");
                     }
                     Err(err) => crate::println!("readsec: error reading sector {}: {}", lba, err),
+                }
+            }
+
+            "writesec" => {
+                let lba_str = parts.next().unwrap_or("0");
+                let lba = parse_u64(lba_str).unwrap_or(0) as u32;
+                let text: alloc::string::String = parts.collect::<alloc::vec::Vec<&str>>().join(" ");
+                let mut buf = [0u8; crate::drivers::ata::SECTOR_SIZE];
+                let bytes = text.as_bytes();
+                let copy_len = bytes.len().min(crate::drivers::ata::SECTOR_SIZE);
+                buf[..copy_len].copy_from_slice(&bytes[..copy_len]);
+
+                match crate::drivers::ata::write_sector(lba, &buf) {
+                    Ok(()) => {
+                        crate::println!("writesec: successfully wrote {} bytes to LBA sector {}", copy_len, lba);
+                    }
+                    Err(err) => {
+                        crate::println!("writesec: error writing sector {}: {}", lba, err);
+                    }
+                }
+            }
+
+            "formatfat" => {
+                let lba = parts.next().and_then(|s| parse_u64(s).ok()).unwrap_or(2048) as u32;
+                let sectors = parts.next().and_then(|s| parse_u64(s).ok()).unwrap_or(65536) as u32;
+                crate::println!("Formatting FAT32 partition at LBA {} ({} sectors = {} MiB)...", lba, sectors, (sectors * 512) / (1024 * 1024));
+                match crate::fs::fat32::Fat32Fs::format(0, lba, sectors, "AURAOS_PERS") {
+                    Ok(fs) => {
+                        let info = fs.fs_info();
+                        crate::println!("formatfat: FAT32 successfully formatted!");
+                        crate::println!("  Volume Label : {}", info.volume_label);
+                        crate::println!("  Total Space  : {} KiB ({} MiB)", info.total_space_kb, info.total_space_kb / 1024);
+                        crate::println!("  Cluster Size : {} bytes", info.bytes_per_cluster);
+                        crate::println!("  Free Clusters: {} / {}", info.free_clusters, info.total_clusters);
+                        *crate::fs::fat32::FAT32_FS.lock() = Some(fs);
+                        crate::println!("  Mounted into global FAT32 filesystem.");
+                    }
+                    Err(e) => crate::println!("formatfat: error: {}", e),
+                }
+            }
+
+            "mountfat" => {
+                let lba = parts.next().and_then(|s| parse_u64(s).ok()).unwrap_or(2048) as u32;
+                match crate::fs::fat32::Fat32Fs::mount(0, lba) {
+                    Ok(fs) => {
+                        let info = fs.fs_info();
+                        crate::println!("mountfat: successfully mounted FAT32 volume from LBA {}!", lba);
+                        crate::println!("  Volume Label : {}", info.volume_label);
+                        crate::println!("  Total Space  : {} KiB ({} MiB)", info.total_space_kb, info.total_space_kb / 1024);
+                        crate::println!("  Free Space   : {} KiB ({} MiB)", info.free_space_kb, info.free_space_kb / 1024);
+                        crate::println!("  Cluster Size : {} bytes", info.bytes_per_cluster);
+                        *crate::fs::fat32::FAT32_FS.lock() = Some(fs);
+                    }
+                    Err(e) => crate::println!("mountfat: error: {}", e),
+                }
+            }
+
+            "fatinfo" => {
+                let fs_guard = crate::fs::fat32::FAT32_FS.lock();
+                match &*fs_guard {
+                    Some(fs) => {
+                        let info = fs.fs_info();
+                        crate::println!("--- FAT32 PERSISTENT VOLUME INFO ---");
+                        crate::println!("  Volume Label : {}", info.volume_label);
+                        crate::println!("  Drive / LBA  : Drive {} at LBA {}", fs.drive, fs.lba_start);
+                        crate::println!("  Total Space  : {} KiB ({} MiB)", info.total_space_kb, info.total_space_kb / 1024);
+                        crate::println!("  Free Space   : {} KiB ({} MiB)", info.free_space_kb, info.free_space_kb / 1024);
+                        crate::println!("  Cluster Size : {} bytes ({} sector/cluster)", info.bytes_per_cluster, fs.bpb.sectors_per_cluster);
+                        crate::println!("  Total Clusters: {}", info.total_clusters);
+                        crate::println!("  Free Clusters : {}", info.free_clusters);
+                        crate::println!("------------------------------------");
+                    }
+                    None => crate::println!("fatinfo: No FAT32 volume mounted. Use 'mountfat' or 'formatfat'."),
+                }
+            }
+
+            "fatls" => {
+                let path = parts.next().unwrap_or("/");
+                let fs_guard = crate::fs::fat32::FAT32_FS.lock();
+                match &*fs_guard {
+                    Some(fs) => match fs.resolve_path(path) {
+                        Ok((Some(entry), _)) => {
+                            if !entry.is_directory {
+                                crate::println!("  {} ({} bytes)", entry.name, entry.file_size);
+                            } else {
+                                match fs.list_directory_cluster(entry.first_cluster) {
+                                    Ok(entries) => {
+                                        crate::println!("FAT32 Directory Listing for '{}':", path);
+                                        if entries.is_empty() {
+                                            crate::println!("  (empty directory)");
+                                        } else {
+                                            for e in &entries {
+                                                let type_str = if e.is_directory { "<DIR>" } else { "     " };
+                                                crate::println!("  {}  {:>8} B  {}", type_str, e.file_size, e.name);
+                                            }
+                                        }
+                                    }
+                                    Err(err) => crate::println!("fatls: error listing directory: {}", err),
+                                }
+                            }
+                        }
+                        Ok((None, _)) => crate::println!("fatls: path '{}' not found", path),
+                        Err(err) => crate::println!("fatls: error: {}", err),
+                    },
+                    None => crate::println!("fatls: No FAT32 volume mounted. Use 'mountfat' or 'formatfat'."),
+                }
+            }
+
+            "fatcat" => {
+                let path = parts.next().unwrap_or("");
+                if path.is_empty() {
+                    crate::println!("Usage: fatcat <path>");
+                } else {
+                    let fs_guard = crate::fs::fat32::FAT32_FS.lock();
+                    match &*fs_guard {
+                        Some(fs) => match fs.read_file(path) {
+                            Ok(bytes) => match core::str::from_utf8(&bytes) {
+                                Ok(text) => crate::println!("{}", text),
+                                Err(_) => crate::println!("<Binary content: {} bytes>", bytes.len()),
+                            },
+                            Err(err) => crate::println!("fatcat: error: {}", err),
+                        },
+                        None => crate::println!("fatcat: No FAT32 volume mounted. Use 'mountfat' or 'formatfat'."),
+                    }
+                }
+            }
+
+            "fatwrite" => {
+                let path = parts.next().unwrap_or("");
+                let text: alloc::string::String = parts.collect::<alloc::vec::Vec<&str>>().join(" ");
+                if path.is_empty() {
+                    crate::println!("Usage: fatwrite <path> <text>");
+                } else {
+                    let mut fs_guard = crate::fs::fat32::FAT32_FS.lock();
+                    match &mut *fs_guard {
+                        Some(fs) => match fs.write_file(path, text.as_bytes()) {
+                            Ok(()) => crate::println!("fatwrite: successfully wrote {} bytes to '{}'", text.len(), path),
+                            Err(err) => crate::println!("fatwrite: error: {}", err),
+                        },
+                        None => crate::println!("fatwrite: No FAT32 volume mounted. Use 'mountfat' or 'formatfat'."),
+                    }
+                }
+            }
+
+            "fatmkdir" => {
+                let path = parts.next().unwrap_or("");
+                if path.is_empty() {
+                    crate::println!("Usage: fatmkdir <path>");
+                } else {
+                    let mut fs_guard = crate::fs::fat32::FAT32_FS.lock();
+                    match &mut *fs_guard {
+                        Some(fs) => match fs.create_dir(path) {
+                            Ok(c) => crate::println!("fatmkdir: created directory '{}' (cluster {})", path, c),
+                            Err(err) => crate::println!("fatmkdir: error: {}", err),
+                        },
+                        None => crate::println!("fatmkdir: No FAT32 volume mounted. Use 'mountfat' or 'formatfat'."),
+                    }
+                }
+            }
+
+            "fatrm" => {
+                let path = parts.next().unwrap_or("");
+                if path.is_empty() {
+                    crate::println!("Usage: fatrm <path>");
+                } else {
+                    let mut fs_guard = crate::fs::fat32::FAT32_FS.lock();
+                    match &mut *fs_guard {
+                        Some(fs) => match fs.delete_entry(path) {
+                            Ok(()) => crate::println!("fatrm: removed entry '{}'", path),
+                            Err(err) => crate::println!("fatrm: error: {}", err),
+                        },
+                        None => crate::println!("fatrm: No FAT32 volume mounted. Use 'mountfat' or 'formatfat'."),
+                    }
                 }
             }
 
