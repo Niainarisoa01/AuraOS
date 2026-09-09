@@ -52,6 +52,8 @@ AuraOS adopte une architecture de type **Micro-Noyau Modulaire** :
 
 * **Isolation Ring 0 / Ring 3 :** Le noyau (*Ring 0*) est réduit au strict minimum vital. Les pilotes de périphériques et les applications s'exécutent en espace utilisateur isolé (*Ring 3*). Si un pilote plante, le cœur du système ne s'effondre jamais.
 
+📖 **Dossier d'architecture détaillé :** Consultez [docs/CONCEPTION_TECHNIQUE_ET_ARCHITECTURE.md](docs/CONCEPTION_TECHNIQUE_ET_ARCHITECTURE.md) pour la spécification technique complète du noyau (bootloader, GDT, IDT, mémoire, scheduler, VFS, drivers, GUI et tests).
+
 ---
 
 ## 📊 3. Métriques Cibles (Horizon 10 Ans)
