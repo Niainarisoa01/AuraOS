@@ -285,12 +285,21 @@ gantt
     Pilote Intel e1000                :p5_1, after p4_3, 6d
     Pile ARP / IPv4 / ICMP Ping       :p5_2, after p5_1, 6d
     Sockets UDP / TCP                 :p5_3, after p5_2, 8d
+    section Phase 6 - ACPI & SMP
+    Scanner RSDP / RSDT / FADT        :p6_1, after p5_3, 5d
+    Extinction Propre ACPI _S5        :p6_2, after p6_1, 4d
+    Local APIC & Énumération MADT     :p6_3, after p6_2, 5d
+    section Phase 7 - Applications
+    AuraEdit & AuraFiles              :p7_1, after p6_3, 7d
+    Moniteur Système & Utilitaires    :p7_2, after p7_1, 6d
 ```
 
-| Sprint | Objectif Principal | Livrable Concret |
-| :--- | :--- | :--- |
-| **Sprint 1** | **Affichage Graphique & Souris** | Bureau macOS 1024x768 affiché à l'écran dans QEMU avec curseur de souris pilotable. |
-| **Sprint 2** | **Multitâche Préemptif** | Basculement automatique de tâches sans blocage, commande `sleep_ms`, exclusion mutuelle Mutex. |
-| **Sprint 3** | **Stockage Persistant** | Écriture sur disque dur ATA et conservation des fichiers créés après redémarrage. |
-| **Sprint 4** | **Espace Utilisateur (Ring 3)** | Exécution de programmes autonomes isolés du noyau communiquant par appels système (`syscall`). |
-| **Sprint 5** | **Réseau & Web** | Commande `ping` fonctionnelle vers l'extérieur et mini-serveur Web hébergé par AuraOS. |
+| Sprint | Objectif Principal | Livrable Concret | Statut |
+| :--- | :--- | :--- | :--- |
+| **Sprint 1** | **Affichage Graphique & Souris** | Bureau macOS 1024x768 affiché à l'écran dans QEMU avec curseur de souris pilotable. | ✅ Terminé |
+| **Sprint 2** | **Multitâche Préemptif** | Basculement automatique de tâches sans blocage, commande `sleep_ms`, exclusion mutuelle Mutex. | ✅ Terminé |
+| **Sprint 3** | **Stockage Persistant** | Écriture sur disque dur ATA et conservation des fichiers créés après redémarrage (FAT32). | ✅ Terminé |
+| **Sprint 4** | **Espace Utilisateur (Ring 3)** | Exécution de programmes autonomes isolés du noyau communiquant par appels système (`syscall`). | ✅ Terminé |
+| **Sprint 5** | **Réseau & Connectivité** | Commande `ping`, `ifconfig`, `arp`, `udpsend`, `netstat` fonctionnels sur Intel 82540EM. | ✅ Terminé |
+| **Sprint 6** | **ACPI & Local APIC (SMP)** | Extinction propre ACPI S5, Local APIC MMIO (`0xFEE00000`), énumération cœurs MADT, 32/32 tests OK. | ✅ Terminé |
+| **Sprint 7** | **Suite Logicielle & Bureau** | Applications fenêtrées graphiques (Éditeur AuraEdit, Explorateur AuraFiles, Moniteur Système). | ⏳ En cours / Suivant |

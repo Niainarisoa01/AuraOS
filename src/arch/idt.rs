@@ -113,10 +113,17 @@ extern "x86-interrupt" fn invalid_opcode_handler(frame: InterruptStackFrame) {
 
 /// Exception 8: Double Fault (#DF).
 extern "x86-interrupt" fn double_fault_handler(frame: InterruptStackFrame, error_code: u64) -> ! {
-    crate::serial_println!("\n[CRITICAL CPU EXCEPTION] Double Fault (#DF) Code: {:#x}, RIP: {:#x}", error_code, frame.instruction_pointer);
+    let cr2: u64;
+    unsafe {
+        core::arch::asm!("mov {}, cr2", out(reg) cr2, options(nomem, nostack, preserves_flags));
+    }
+    crate::serial_println!("\n[CRITICAL CPU EXCEPTION] Double Fault (#DF) Code: {:#x}, RIP: {:#x}, RSP: {:#x}, CR2: {:#x}",
+        error_code, frame.instruction_pointer, frame.stack_pointer, cr2);
     crate::println!("\n[CRITICAL CPU EXCEPTION] Double Fault (#DF)");
     crate::println!("  Error Code  : {:#x}", error_code);
     crate::println!("  Faulting RIP: {:#x}", frame.instruction_pointer);
+    crate::println!("  Stack RSP   : {:#x}", frame.stack_pointer);
+    crate::println!("  CR2 Addr    : {:#x}", cr2);
     loop {
         unsafe { core::arch::asm!("hlt", options(nomem, nostack, preserves_flags)) };
     }

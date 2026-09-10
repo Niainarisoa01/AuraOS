@@ -192,27 +192,62 @@ pub fn read_cr3() -> PhysAddr {
     PhysAddr(value & 0x000F_FFFF_FFFF_F000)
 }
 
-/// Maps the 3 GiB .. 4 GiB PCI MMIO range (0xC000_0000..0xFFFF_FFFF)
-/// as a 1 GiB huge page in the active page table.
-///
-/// This provides direct virtual-to-physical identity access to the
-/// Bochs VGA linear framebuffer (at 0xFD000000) and PCI MMIO registers.
-pub fn map_mmio_pci_range() {
+/// Maps physical memory ranges needed for hardware probing, ACPI tables, and MMIO:
+/// 1. Low BIOS ROM & EBDA (0x80000..0x100000) via L1 page table entries in PD[0].
+/// 2. Physical RAM (2 MiB .. 512 MiB) via 2 MiB huge pages in L2 page directory PDPT[0].
+/// 3. PCI MMIO & Local APIC range (0xC000_0000..0xFFFF_FFFF) via 1 GiB huge page in PDPT[3].
+pub fn init_hardware_mappings() {
     let cr3 = read_cr3();
     let p4_ptr = cr3.as_u64() as *const u64;
     unsafe {
         let p4_entry0 = *p4_ptr;
-        if (p4_entry0 & page_flags::PRESENT) != 0 {
-            let p3_phys = p4_entry0 & 0x000F_FFFF_FFFF_F000;
-            // P3 is identity-mapped in the low memory region (0x1000..0x14000)
-            let p3_entry3_ptr = (p3_phys + 3 * 8) as *mut u64;
-            // 0xC000_0000 | PRESENT (1) | WRITABLE (2) | HUGE_PAGE (0x80)
-            *p3_entry3_ptr = 0xC000_0000 | page_flags::PRESENT | page_flags::WRITABLE | page_flags::HUGE_PAGE;
-
-            // Reload CR3 to flush the CPU Translation Lookaside Buffer (TLB)
-            flush_tlb();
+        if (p4_entry0 & page_flags::PRESENT) == 0 {
+            return;
         }
+
+        let p3_phys = p4_entry0 & 0x000F_FFFF_FFFF_F000;
+        let p3_ptr = p3_phys as *mut u64;
+
+        // 1. Map 3 GiB .. 4 GiB (Local APIC 0xFEE00000, IO-APIC 0xFEC00000, PCI MMIO)
+        let p3_entry3_ptr = p3_ptr.add(3);
+        *p3_entry3_ptr = 0xC000_0000 | page_flags::PRESENT | page_flags::WRITABLE | page_flags::HUGE_PAGE;
+
+        // 2. Map physical memory in PDPT[0] (first 1 GiB)
+        let p3_entry0 = *p3_ptr;
+        if (p3_entry0 & page_flags::PRESENT) != 0 && (p3_entry0 & page_flags::HUGE_PAGE) == 0 {
+            let p2_phys = p3_entry0 & 0x000F_FFFF_FFFF_F000;
+            let p2_ptr = p2_phys as *mut u64;
+
+            // Map 2 MiB .. 512 MiB using 2 MiB huge pages (entries 1..256)
+            for j in 1..256 {
+                let p2_entry = p2_ptr.add(j);
+                if (*p2_entry & page_flags::PRESENT) == 0 {
+                    *p2_entry = ((j as u64) << 21) | page_flags::PRESENT | page_flags::WRITABLE | page_flags::HUGE_PAGE;
+                }
+            }
+
+            // 3. Map BIOS ROM & EBDA (0x80000..0x100000) in Level 1 Page Table for PD[0]
+            let p2_entry0 = *p2_ptr;
+            if (p2_entry0 & page_flags::PRESENT) != 0 && (p2_entry0 & page_flags::HUGE_PAGE) == 0 {
+                let p1_phys = p2_entry0 & 0x000F_FFFF_FFFF_F000;
+                let p1_ptr = p1_phys as *mut u64;
+
+                for p in 0x80..0x100 {
+                    let p1_entry = p1_ptr.add(p);
+                    if (*p1_entry & page_flags::PRESENT) == 0 {
+                        *p1_entry = ((p as u64) << 12) | page_flags::PRESENT | page_flags::WRITABLE;
+                    }
+                }
+            }
+        }
+
+        flush_tlb();
     }
+}
+
+/// Compatibility alias for map_mmio_pci_range.
+pub fn map_mmio_pci_range() {
+    init_hardware_mappings();
 }
 
 /// Writes a new physical address to the CR3 control register, switching the active page table.

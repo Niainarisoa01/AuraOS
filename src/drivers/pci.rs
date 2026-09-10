@@ -121,6 +121,66 @@ pub fn pci_read_config_u8(bus: u8, slot: u8, func: u8, offset: u8) -> u8 {
     ((reg32 >> shift) & 0xFF) as u8
 }
 
+/// Writes a 32-bit register into the PCI configuration space.
+pub fn pci_write_config_u32(bus: u8, slot: u8, func: u8, offset: u8, value: u32) {
+    let address = ((1u32) << 31)
+        | ((bus as u32) << 16)
+        | ((slot as u32) << 11)
+        | ((func as u32) << 8)
+        | ((offset as u32) & 0xFC);
+
+    unsafe {
+        outl(PCI_CONFIG_ADDRESS, address);
+        outl(PCI_CONFIG_DATA, value);
+    }
+}
+
+/// Writes a 16-bit register into the PCI configuration space.
+pub fn pci_write_config_u16(bus: u8, slot: u8, func: u8, offset: u8, value: u16) {
+    let current = pci_read_config_u32(bus, slot, func, offset);
+    let shift = (offset & 2) * 8;
+    let mask = !(0xFFFFu32 << shift);
+    let new_val = (current & mask) | ((value as u32) << shift);
+    pci_write_config_u32(bus, slot, func, offset, new_val);
+}
+
+/// Writes an 8-bit register into the PCI configuration space.
+#[allow(dead_code)]
+pub fn pci_write_config_u8(bus: u8, slot: u8, func: u8, offset: u8, value: u8) {
+    let current = pci_read_config_u32(bus, slot, func, offset);
+    let shift = (offset & 3) * 8;
+    let mask = !(0xFFu32 << shift);
+    let new_val = (current & mask) | ((value as u32) << shift);
+    pci_write_config_u32(bus, slot, func, offset, new_val);
+}
+
+/// Enables Bus Mastering and Memory/IO Space access on a PCI device.
+pub fn pci_enable_bus_master(bus: u8, slot: u8, func: u8) {
+    let command = pci_read_config_u16(bus, slot, func, 0x04);
+    // Bit 0: I/O Space, Bit 1: Memory Space, Bit 2: Bus Master
+    let new_command = command | 0x07;
+    pci_write_config_u16(bus, slot, func, 0x04, new_command);
+}
+
+/// Returns the Base Address Register (BAR) value and a boolean indicating whether it is I/O space (true) or Memory space (false).
+pub fn pci_get_bar(bus: u8, slot: u8, func: u8, bar_index: u8) -> (u64, bool) {
+    let offset = 0x10 + bar_index * 4;
+    let bar_low = pci_read_config_u32(bus, slot, func, offset);
+    let is_io = (bar_low & 1) != 0;
+
+    if is_io {
+        ((bar_low & !0x3) as u64, true)
+    } else {
+        let is_64bit = (bar_low & 0x06) == 0x04;
+        let mut base = (bar_low & !0xF) as u64;
+        if is_64bit && bar_index < 5 {
+            let bar_high = pci_read_config_u32(bus, slot, func, offset + 4);
+            base |= (bar_high as u64) << 32;
+        }
+        (base, false)
+    }
+}
+
 /// Scans the PCI bus and returns all discovered active devices.
 pub fn scan_pci_bus() -> Vec<PciDevice> {
     let mut devices = Vec::new();

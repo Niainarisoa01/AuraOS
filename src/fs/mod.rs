@@ -13,6 +13,7 @@ use crate::sync::Spinlock;
 use alloc::borrow::Cow;
 
 pub mod fat32;
+pub mod elf;
 
 #[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -90,9 +91,19 @@ impl Vfs {
         // Create standard system hierarchy: /etc, /docs, /bin, /proc, /dev
         let etc_id = self.mkdir_at(0, "etc").unwrap_or(0);
         let docs_id = self.mkdir_at(0, "docs").unwrap_or(0);
-        let _bin_id = self.mkdir_at(0, "bin").unwrap_or(0);
+        let bin_id = self.mkdir_at(0, "bin").unwrap_or(0);
         let proc_id = self.mkdir_at(0, "proc").unwrap_or(0);
         let dev_id = self.mkdir_at(0, "dev").unwrap_or(0);
+
+        // Populate /bin with genuine 64-bit ELF executables
+        let hello_elf = elf::build_hello_elf();
+        let _ = self.create_file_at(bin_id, "hello", &hello_elf);
+
+        let counter_elf = elf::build_counter_elf();
+        let _ = self.create_file_at(bin_id, "counter", &counter_elf);
+
+        let init_elf = elf::build_init_elf();
+        let _ = self.create_file_at(bin_id, "init", &init_elf);
 
         // Populate system configuration and documentation files
         let _ = self.create_file_at(etc_id, "hostname", b"auraos-baremetal");

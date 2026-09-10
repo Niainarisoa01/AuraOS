@@ -124,7 +124,7 @@ pub fn process_pending_keys() {
                 crate::shell::SHELL.lock().backspace();
             }
             b'\r' | b'\n' => {
-                crate::shell::SHELL.lock().enter();
+                crate::shell::on_enter();
             }
             ascii if (0x20..=0x7E).contains(&ascii) => {
                 crate::shell::SHELL.lock().push_char(ascii);
@@ -152,7 +152,7 @@ pub fn process_pending_keys() {
                 crate::shell::SHELL.lock().backspace();
             }
             Some(b'\n') => {
-                crate::shell::SHELL.lock().enter();
+                crate::shell::on_enter();
             }
             Some(ascii) if (0x20..=0x7E).contains(&ascii) => {
                 crate::shell::SHELL.lock().push_char(ascii);

@@ -12,3 +12,6 @@ pub mod pic;
 pub mod cpuid;
 pub mod syscall;
 pub mod ring3;
+pub mod acpi;
+pub mod power;
+pub mod apic;

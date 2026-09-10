@@ -99,6 +99,17 @@ unsafe fn wrmsr(msr: u32, value: u64) {
     }
 }
 
+/// Scratch variables for switching between user and kernel stacks on syscall
+pub static mut USER_RSP_SCRATCH: u64 = 0;
+pub static mut KERNEL_RSP_SCRATCH: u64 = 0;
+
+/// Updates the kernel stack pointer used on syscall entry
+pub fn set_kernel_rsp(rsp: u64) {
+    unsafe {
+        KERNEL_RSP_SCRATCH = rsp;
+    }
+}
+
 /// The kernel-side syscall entry point.
 ///
 /// When a user-space program executes `syscall`:
@@ -106,17 +117,22 @@ unsafe fn wrmsr(msr: u32, value: u64) {
 ///   - R11 = saved RFLAGS
 ///   - RAX = syscall number
 ///   - RDI, RSI, RDX, R10, R8, R9 = arguments
+///   - RSP = user stack pointer (must switch to kernel stack immediately!)
 ///
-/// This handler dispatches to the appropriate kernel function and returns
-/// the result in RAX. It then executes `sysretq` to return to user space.
+/// This handler switches to the task's kernel stack, dispatches to the
+/// appropriate kernel function, restores the user stack, and executes `sysretq`.
 #[unsafe(naked)]
 unsafe extern "C" fn syscall_entry() {
     core::arch::naked_asm!(
-        // Save user stack pointer and callee-saved registers
-        // RCX = user RIP, R11 = user RFLAGS (saved by CPU)
-        "swapgs",                    // Switch to kernel GS base (if applicable)
-        "push rcx",                  // Save user RIP
-        "push r11",                  // Save user RFLAGS
+        // 1. Save user RSP to scratch variable
+        "mov [rip + {user_rsp}], rsp",
+        // 2. Switch to the task's dedicated kernel stack
+        "mov rsp, [rip + {kernel_rsp}]",
+
+        // 3. Save user RSP, user RIP, user RFLAGS, and callee-saved registers on kernel stack
+        "push [rip + {user_rsp}]",   // User RSP
+        "push rcx",                  // User RIP (saved by CPU)
+        "push r11",                  // User RFLAGS (saved by CPU)
         "push rbp",
         "push rbx",
         "push r12",
@@ -124,24 +140,26 @@ unsafe extern "C" fn syscall_entry() {
         "push r14",
         "push r15",
 
-        // Call the Rust syscall dispatcher
+        // 4. Call the Rust syscall dispatcher
         // RAX = syscall number (already in rax)
         // RDI, RSI, RDX, R10, R8, R9 = args (R10 replaces RCX per syscall ABI)
         "mov rcx, r10",             // Restore 4th arg from R10 to RCX (C calling convention)
         "call {handler}",
 
-        // Restore saved registers
+        // 5. Restore callee-saved registers
         "pop r15",
         "pop r14",
         "pop r13",
         "pop r12",
         "pop rbx",
         "pop rbp",
-        "pop r11",                   // Restore RFLAGS for sysretq
-        "pop rcx",                   // Restore RIP for sysretq
-        "swapgs",                    // Switch back to user GS base
+        "pop r11",                   // Restore user RFLAGS for sysretq
+        "pop rcx",                   // Restore user RIP for sysretq
+        "pop rsp",                   // Restore user RSP!
         "sysretq",                   // Return to Ring 3
 
+        user_rsp = sym USER_RSP_SCRATCH,
+        kernel_rsp = sym KERNEL_RSP_SCRATCH,
         handler = sym syscall_dispatch,
     );
 }
@@ -181,15 +199,21 @@ extern "C" fn syscall_dispatch(
             0
         }
         SYS_WRITE => {
-            // write(fd, buf_ptr, len) — for now, fd=1 → serial+VGA output
+            // write(fd, buf_ptr, len) — fd=1 (stdout), fd=2 (stderr)
             if arg1 == 1 || arg1 == 2 {
                 let ptr = arg2 as *const u8;
                 let len = arg3 as usize;
                 if !ptr.is_null() && len <= 4096 {
+                    let mut serial = crate::drivers::serial::SERIAL1.lock();
+                    let mut vga = crate::drivers::vga::WRITER.lock();
                     for i in 0..len {
                         let byte = unsafe { core::ptr::read_volatile(ptr.add(i)) };
                         if byte == 0 { break; }
-                        // Output character (simplified — no actual print macro in syscall context)
+                        if byte == b'\n' {
+                            serial.send_byte(b'\r');
+                        }
+                        serial.send_byte(byte);
+                        vga.write_byte(byte);
                     }
                 }
                 len as u64

@@ -20,3 +20,4 @@ pub mod framebuffer;
 pub mod bga;
 pub mod mouse;
 pub mod pit;
+pub mod e1000;

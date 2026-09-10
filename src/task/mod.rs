@@ -316,6 +316,7 @@ pub fn init() {
 pub fn on_context_switch(is_user: bool, kstack_top: u64, cr3_opt: Option<u64>) {
     if is_user {
         crate::arch::gdt::set_tss_rsp0(kstack_top);
+        crate::arch::syscall::set_kernel_rsp(kstack_top);
         if let Some(cr3) = cr3_opt {
             unsafe {
                 crate::memory::paging::write_cr3(crate::memory::paging::PhysAddr(cr3));

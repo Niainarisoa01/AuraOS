@@ -15,6 +15,7 @@ mod memory;
 mod task;
 mod fs;
 pub mod gui;
+mod net;
 mod shell;
 mod tests;
 
@@ -101,6 +102,20 @@ pub extern "C" fn _start() -> ! {
             dev.vendor_name(), dev.class_name());
     }
 
+    // Step 7b: Initialize ACPI Subsystem & Local APIC
+    memory::paging::init_hardware_mappings();
+    arch::acpi::init();
+    arch::apic::init();
+    {
+        let acpi = arch::acpi::ACPI_DATA.lock();
+        if acpi.is_initialized {
+            println!("[OK] ACPI       : {} tables (FADT: {:#x}, MADT: {:#x}, {} core(s))",
+                acpi.tables_count, acpi.fadt_addr, acpi.madt_addr, acpi.cores.len());
+        } else {
+            println!("[--] ACPI       : RSDP not detected (legacy PC mode).");
+        }
+    }
+
     // Step 8: Initialize Kernel Multitasking & Scheduler
     task::init();
     println!("[OK] Tasks     : Round-Robin scheduler initialized (TCBs ready).");
@@ -115,6 +130,18 @@ pub extern "C" fn _start() -> ! {
     unsafe { core::arch::asm!("sti", options(nomem, nostack)) };
     println!("[OK] CPU       : Hardware interrupts enabled (sti).");
     serial_println!("[OK] Interrupts enabled (sti).");
+
+    // Step 10b: Initialize Network Stack (Intel e1000 + Ethernet/ARP/IPv4/ICMP/UDP)
+    let net_ok = net::init();
+    if net_ok {
+        let net_info = net::NETWORK.lock();
+        println!("[OK] Network   : e1000 NIC active ({:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}, {}.{}.{}.{})",
+            net_info.mac[0], net_info.mac[1], net_info.mac[2],
+            net_info.mac[3], net_info.mac[4], net_info.mac[5],
+            net_info.ip[0], net_info.ip[1], net_info.ip[2], net_info.ip[3]);
+    } else {
+        println!("[--] Network   : No e1000 NIC detected (loopback mode).");
+    }
 
     // Step 11: Execute Kernel Automated Subsystem Diagnostics
     println!();
@@ -144,6 +171,8 @@ pub extern "C" fn _start() -> ! {
     println!("[OK] Memory    : 8 MiB Heap, 4 KiB Paging abstractions");
     println!("[OK] Filesystem: Virtual Inode VFS mounted at '/'");
     println!("[OK] Storage   : ATA / IDE PIO 28-bit driver active");
+    println!("[OK] Network   : Intel e1000 Gigabit Ethernet (ARP/IPv4/ICMP/UDP)");
+    println!("[OK] Power/ACPI: S5 Soft-Off ready, Local APIC initialized");
     println!("[OK] Serial    : COM1 UART at 0x3F8 (115200 baud)");
     println!("[OK] Video     : VGA 80x25 text mode with auto-scrolling");
     println!("[OK] Keyboard  : PS/2 driver active (direct typing)");
@@ -160,6 +189,7 @@ pub extern "C" fn _start() -> ! {
     // until the next hardware interrupt (timer tick or keypress).
     loop {
         drivers::keyboard::process_pending_keys();
+        net::poll();
         unsafe { core::arch::asm!("sti; hlt", options(nomem, nostack)); }
     }
 }

@@ -6,7 +6,6 @@
 //! entered via the PS/2 keyboard.
 
 use crate::drivers::vga::clear_screen;
-use crate::arch::io::outb;
 use crate::sync::Spinlock;
 
 const BUFFER_MAX: usize = 128;
@@ -42,6 +41,7 @@ impl Shell {
     }
 
     /// Submits the current line (Enter key) and executes the parsed command.
+    #[allow(dead_code)]
     pub fn enter(&mut self) {
         crate::println!();
 
@@ -60,7 +60,7 @@ impl Shell {
     }
 
     /// Parses and executes the requested command.
-    fn execute(cmd: &str) {
+    pub fn execute(cmd: &str) {
         let mut parts = cmd.split_whitespace();
         let command = parts.next().unwrap_or("");
 
@@ -76,6 +76,8 @@ impl Shell {
                 crate::println!("  tasks / ps  - Display kernel tasks, states, and stack pointers");
                 crate::println!("  ipc [cmd]   - Inter-Process Communication (status, send, recv)");
                 crate::println!("  userdemo    - Spawn and benchmark Ring 3 user process");
+                crate::println!("  exec <path> - Execute a 64-bit ELF binary in Ring 3 userspace");
+                crate::println!("  elfinfo <p> - Inspect 64-bit ELF executable header & segments");
                 crate::println!("  sleep <ms>  - Put current task to sleep for N milliseconds");
                 crate::println!("  spawn <name>- Spawn a background worker task");
                 crate::println!("  kill <id>   - Terminate a task by its numeric ID");
@@ -104,6 +106,13 @@ impl Shell {
                 crate::println!("  fatmkdir <path>       Create a directory on FAT32 volume");
                 crate::println!("  fatrm <path>          Delete a file from FAT32 volume");
                 crate::println!("  gui / desktop- Render and benchmark macOS-style Desktop UI");
+                crate::println!("  ifconfig    - Display network interface configuration");
+                crate::println!("  ping <ip>   - Send ICMP Echo Request (ping) to an IP address");
+                crate::println!("  arp         - Display the ARP translation cache table");
+                crate::println!("  udpsend <ip> <port> <text> Send a UDP datagram");
+                crate::println!("  netstat     - Display network interface statistics");
+                crate::println!("  acpi        - Display ACPI hardware description tables & power info");
+                crate::println!("  cores / smp - Display enumerated CPU cores & Local APIC metrics");
                 crate::println!("  test        - Run automated kernel subsystem self-tests");
                 crate::println!("  reboot      - Reset and restart the computer");
                 crate::println!("  shutdown    - Power off the system / virtual machine");
@@ -180,6 +189,65 @@ impl Shell {
                     }
                 }
                 crate::println!("---------------------------------------");
+            }
+
+            "acpi" => {
+                let acpi = crate::arch::acpi::ACPI_DATA.lock();
+                crate::println!("--- AURAOS ACPI POWER & CONFIGURATION TABLES ---");
+                if !acpi.is_initialized {
+                    crate::println!("  ACPI status: Not detected or uninitialized.");
+                } else {
+                    let oem_str = core::str::from_utf8(&acpi.oem_id).unwrap_or("???");
+                    crate::println!("  OEM ID         : {}", oem_str);
+                    crate::println!("  RSDP Address   : {:#x}", acpi.rsdp_addr);
+                    if acpi.xsdt_addr != 0 {
+                        crate::println!("  XSDT Address   : {:#x} (64-bit)", acpi.xsdt_addr);
+                    } else {
+                        crate::println!("  RSDT Address   : {:#x} (32-bit)", acpi.rsdt_addr);
+                    }
+                    crate::println!("  Tables Count   : {}", acpi.tables_count);
+                    crate::println!("  FADT Address   : {:#x}", acpi.fadt_addr);
+                    crate::println!("  DSDT Address   : {:#x}", acpi.dsdt_addr);
+                    crate::println!("  MADT Address   : {:#x}", acpi.madt_addr);
+                    crate::println!("  SMI Command    : {:#x} (ACPI Enable: {:#x})", acpi.smi_cmd, acpi.acpi_enable);
+                    crate::println!("  PM1a Control   : {:#x}", acpi.pm1a_cnt_blk);
+                    if acpi.pm1b_cnt_blk != 0 {
+                        crate::println!("  PM1b Control   : {:#x}", acpi.pm1b_cnt_blk);
+                    }
+                    crate::println!("  Soft-Off (_S5) : {}", if acpi.has_s5 { "Discovered" } else { "Not found in DSDT" });
+                    if acpi.has_s5 {
+                        crate::println!("    * SLP_TYPa   : {:#x}", acpi.slp_typa);
+                        crate::println!("    * SLP_TYPb   : {:#x}", acpi.slp_typb);
+                    }
+                }
+                crate::println!("------------------------------------------------");
+            }
+
+            "cores" | "smp" => {
+                let acpi = crate::arch::acpi::ACPI_DATA.lock();
+                let lapic = crate::arch::apic::LOCAL_APIC.lock();
+                crate::println!("--- AURAOS MULTIPROCESSOR (SMP) & APIC REPORT ---");
+                crate::println!("  Local APIC Base: {:#x}", lapic.base_addr);
+                crate::println!("  Bootstrap CPU  : APIC ID {}", lapic.apic_id);
+                crate::println!("  LAPIC Version  : {:#x}", lapic.version);
+                crate::println!("  Software Enable: {}", if lapic.is_enabled { "Yes (SVR active)" } else { "No" });
+                crate::println!("  Discovered Cores (MADT): {}", acpi.cores.len());
+                for (idx, core) in acpi.cores.iter().enumerate() {
+                    crate::println!(
+                        "    [Core {}] ACPI Processor ID: {}, APIC ID: {}, Status: {}",
+                        idx,
+                        core.processor_id,
+                        core.apic_id,
+                        if core.is_enabled { "Enabled / Online" } else { "Disabled" }
+                    );
+                }
+                if !acpi.io_apics.is_empty() {
+                    crate::println!("  Discovered I/O APICs: {}", acpi.io_apics.len());
+                    for io in &acpi.io_apics {
+                        crate::println!("    [I/O APIC {}] MMIO Address: {:#x}, GSI Base: {}", io.id, io.address, io.gsi_base);
+                    }
+                }
+                crate::println!("-------------------------------------------------");
             }
 
             "sysinfo" => {
@@ -328,6 +396,114 @@ impl Shell {
                     crate::println!("  [FAIL] Could not allocate user address space");
                 }
                 crate::println!("--------------------------------------");
+            }
+
+            "elfinfo" => {
+                let raw_path = parts.next().unwrap_or("/bin/hello");
+                let resolved_path = if !raw_path.starts_with('/') && !raw_path.contains('/') {
+                    alloc::format!("/bin/{}", raw_path)
+                } else {
+                    alloc::string::String::from(raw_path)
+                };
+
+                let file_data = {
+                    let vfs = crate::fs::VFS.lock();
+                    match vfs.resolve_path(&resolved_path) {
+                        Ok(node_id) => match vfs.read_file(node_id) {
+                            Ok(cow) => Some(cow.to_vec()),
+                            Err(e) => {
+                                crate::println!("elfinfo: cannot read '{}': {}", resolved_path, e);
+                                None
+                            }
+                        },
+                        Err(e) => {
+                            crate::println!("elfinfo: file not found '{}': {}", resolved_path, e);
+                            None
+                        }
+                    }
+                };
+
+                if let Some(data) = file_data {
+                    match crate::fs::elf::ElfBinary::parse(&data) {
+                        Ok(elf) => {
+                            crate::println!("--- ELF64 BINARY INFO: {} ---", resolved_path);
+                            crate::println!("  Format:       ELF64 (64-bit AMD x86-64)");
+                            crate::println!("  Type:         {:#x} (ET_EXEC=2, ET_DYN=3)", elf.header.elf_type);
+                            crate::println!("  Entry Point:  {:#018x}", elf.entry_point());
+                            crate::println!("  Program Hdr:  offset={:#x}, count={}, entry_size={}",
+                                elf.header.phoff, elf.header.phnum, elf.header.phentsize);
+                            crate::println!("  Section Hdr:  offset={:#x}, count={}, entry_size={}",
+                                elf.header.shoff, elf.header.shnum, elf.header.shentsize);
+
+                            if let Ok(phdrs) = elf.program_headers() {
+                                crate::println!("  Segments ({} total):", phdrs.len());
+                                for (i, p) in phdrs.iter().enumerate() {
+                                    let type_str = match p.p_type {
+                                        crate::fs::elf::PT_LOAD => "PT_LOAD",
+                                        crate::fs::elf::PT_DYNAMIC => "PT_DYNAMIC",
+                                        crate::fs::elf::PT_INTERP => "PT_INTERP",
+                                        crate::fs::elf::PT_NOTE => "PT_NOTE",
+                                        crate::fs::elf::PT_PHDR => "PT_PHDR",
+                                        crate::fs::elf::PT_GNU_STACK => "PT_GNU_STACK",
+                                        _ => "UNKNOWN",
+                                    };
+                                    let r = if (p.p_flags & crate::fs::elf::PF_R) != 0 { 'R' } else { '-' };
+                                    let w = if (p.p_flags & crate::fs::elf::PF_W) != 0 { 'W' } else { '-' };
+                                    let x = if (p.p_flags & crate::fs::elf::PF_X) != 0 { 'X' } else { '-' };
+                                    crate::println!("    [{}] {:<12} vaddr={:#010x} filesz={} memsz={} [{}{}{}] align={:#x}",
+                                        i, type_str, p.p_vaddr, p.p_filesz, p.p_memsz, r, w, x, p.p_align);
+                                }
+                            }
+                            crate::println!("--------------------------------------");
+                        }
+                        Err(e) => {
+                            crate::println!("elfinfo: failed to parse '{}': {}", resolved_path, e.as_str());
+                        }
+                    }
+                }
+            }
+
+            "exec" => {
+                let raw_path = parts.next().unwrap_or("/bin/hello");
+                let resolved_path = if !raw_path.starts_with('/') && !raw_path.contains('/') {
+                    alloc::format!("/bin/{}", raw_path)
+                } else {
+                    alloc::string::String::from(raw_path)
+                };
+
+                let file_data = {
+                    let vfs = crate::fs::VFS.lock();
+                    match vfs.resolve_path(&resolved_path) {
+                        Ok(node_id) => match vfs.read_file(node_id) {
+                            Ok(cow) => Some(cow.to_vec()),
+                            Err(e) => {
+                                crate::println!("exec: cannot read '{}': {}", resolved_path, e);
+                                None
+                            }
+                        },
+                        Err(e) => {
+                            crate::println!("exec: file not found '{}': {}", resolved_path, e);
+                            None
+                        }
+                    }
+                };
+
+                if let Some(data) = file_data {
+                    let program_name: &'static str = alloc::boxed::Box::leak(
+                        alloc::format!("user-{}", resolved_path.trim_start_matches('/')).into_boxed_str()
+                    );
+
+                    match crate::fs::elf::load_and_spawn(program_name, &data) {
+                        Ok(pid) => {
+                            crate::println!("[EXEC] Launched Ring 3 ELF process '{}' (PID {})", program_name, pid);
+                            // Yield CPU slice to immediately run the process
+                            crate::task::yield_now();
+                        }
+                        Err(err) => {
+                            crate::println!("exec: failed to load ELF binary '{}': {}", resolved_path, err.as_str());
+                        }
+                    }
+                }
             }
 
             "sleep" => {
@@ -753,6 +929,137 @@ impl Shell {
                 }
             }
 
+            "ifconfig" => {
+                let net = crate::net::NETWORK.lock();
+                crate::println!("--- AURAOS NETWORK INTERFACE (eth0) ---");
+                crate::println!("  Status       : {}", if net.is_enabled { "UP (e1000 Active)" } else { "DOWN (No NIC)" });
+                crate::println!("  MAC Address  : {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
+                    net.mac[0], net.mac[1], net.mac[2], net.mac[3], net.mac[4], net.mac[5]);
+                crate::println!("  IPv4 Address : {}.{}.{}.{}",
+                    net.ip[0], net.ip[1], net.ip[2], net.ip[3]);
+                crate::println!("  Subnet Mask  : {}.{}.{}.{}",
+                    net.subnet[0], net.subnet[1], net.subnet[2], net.subnet[3]);
+                crate::println!("  Gateway      : {}.{}.{}.{}",
+                    net.gateway[0], net.gateway[1], net.gateway[2], net.gateway[3]);
+                crate::println!("  DNS Server   : {}.{}.{}.{}",
+                    net.dns[0], net.dns[1], net.dns[2], net.dns[3]);
+                crate::println!("  TX Packets   : {} ({} bytes)", net.packets_tx, net.bytes_tx);
+                crate::println!("  RX Packets   : {} ({} bytes)", net.packets_rx, net.bytes_rx);
+                crate::println!("---------------------------------------");
+            }
+
+            "ping" => {
+                let ip_str = parts.next().unwrap_or("10.0.2.2");
+                if let Some(target_ip) = parse_ipv4(ip_str) {
+                    crate::println!("PING {}.{}.{}.{} — sending ICMP Echo Request...",
+                        target_ip[0], target_ip[1], target_ip[2], target_ip[3]);
+
+                    let sent = {
+                        let mut net = crate::net::NETWORK.lock();
+                        if !net.is_enabled {
+                            crate::println!("ping: network interface is DOWN. No e1000 NIC detected.");
+                            false
+                        } else {
+                            net.send_ping(target_ip)
+                        }
+                    };
+
+                    if sent {
+                        // Poll for reply (wait up to ~2 seconds = 200 ticks at 100 Hz, with spin guard)
+                        let start = crate::arch::idt::ticks();
+                        let mut got_reply = false;
+                        let mut guard: u32 = 0;
+                        while crate::arch::idt::ticks().saturating_sub(start) < 200 && guard < 100_000 {
+                            crate::net::poll();
+                            {
+                                let net = crate::net::NETWORK.lock();
+                                if let Some(rtt) = net.last_ping_rtt_ms {
+                                    crate::println!("Reply from {}.{}.{}.{}: time={} ms (seq={})",
+                                        target_ip[0], target_ip[1], target_ip[2], target_ip[3],
+                                        rtt, net.last_ping_seq);
+                                    got_reply = true;
+                                    break;
+                                }
+                            }
+                            core::hint::spin_loop();
+                            guard += 1;
+                        }
+                        if !got_reply {
+                            crate::println!("Request timed out (no reply in 2000 ms).");
+                        }
+                    }
+                } else {
+                    crate::println!("ping: invalid IP address '{}'. Usage: ping 10.0.2.2", ip_str);
+                }
+            }
+
+            "arp" => {
+                let net = crate::net::NETWORK.lock();
+                crate::println!("--- AURAOS ARP CACHE TABLE ---");
+                if net.arp_table.entries.is_empty() {
+                    crate::println!("  (empty — no resolved entries)");
+                } else {
+                    crate::println!("  IP ADDRESS         MAC ADDRESS           AGE (ticks)");
+                    crate::println!("  ---------------    -----------------     -----------");
+                    let now = crate::arch::idt::ticks();
+                    for entry in &net.arp_table.entries {
+                        let age = now.saturating_sub(entry.timestamp_tick);
+                        crate::println!("  {}.{}.{}.{:<8}  {:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}      {}",
+                            entry.ip[0], entry.ip[1], entry.ip[2], entry.ip[3],
+                            entry.mac[0], entry.mac[1], entry.mac[2],
+                            entry.mac[3], entry.mac[4], entry.mac[5],
+                            age);
+                    }
+                }
+                crate::println!("  Total entries: {}", net.arp_table.entries.len());
+                crate::println!("------------------------------");
+            }
+
+            "udpsend" => {
+                let ip_str = parts.next().unwrap_or("");
+                let port_str = parts.next().unwrap_or("");
+                let text: alloc::string::String = parts.collect::<alloc::vec::Vec<&str>>().join(" ");
+
+                if ip_str.is_empty() || port_str.is_empty() {
+                    crate::println!("Usage: udpsend <ip> <port> <text>");
+                    crate::println!("  Example: udpsend 10.0.2.2 9999 Hello from AuraOS!");
+                } else if let (Some(dest_ip), Ok(dest_port)) = (parse_ipv4(ip_str), parse_u64(port_str)) {
+                    let msg = if text.is_empty() { "AuraOS UDP Test" } else { &text };
+                    let mut net = crate::net::NETWORK.lock();
+                    if !net.is_enabled {
+                        crate::println!("udpsend: network interface is DOWN.");
+                    } else {
+                        let ok = net.send_udp(dest_ip, 12345, dest_port as u16, msg.as_bytes());
+                        if ok {
+                            crate::println!("UDP: Sent {} bytes to {}.{}.{}.{}:{}",
+                                msg.len(), dest_ip[0], dest_ip[1], dest_ip[2], dest_ip[3], dest_port);
+                        } else {
+                            crate::println!("udpsend: failed to transmit UDP datagram.");
+                        }
+                    }
+                } else {
+                    crate::println!("udpsend: invalid IP or port. Usage: udpsend <ip> <port> <text>");
+                }
+            }
+
+            "netstat" => {
+                let net = crate::net::NETWORK.lock();
+                crate::println!("=== AURAOS NETWORK STATISTICS ===");
+                crate::println!("  Interface    : eth0 (Intel e1000 Gigabit)");
+                crate::println!("  Status       : {}", if net.is_enabled { "UP" } else { "DOWN" });
+                crate::println!("  TX Packets   : {}", net.packets_tx);
+                crate::println!("  TX Bytes     : {} ({} KiB)", net.bytes_tx, net.bytes_tx / 1024);
+                crate::println!("  RX Packets   : {}", net.packets_rx);
+                crate::println!("  RX Bytes     : {} ({} KiB)", net.bytes_rx, net.bytes_rx / 1024);
+                crate::println!("  Pings Sent   : {}", net.pings_sent);
+                crate::println!("  Pings Received: {}", net.pings_received);
+                if let Some(rtt) = net.last_ping_rtt_ms {
+                    crate::println!("  Last RTT     : {} ms", rtt);
+                }
+                crate::println!("  ARP Entries  : {}", net.arp_table.entries.len());
+                crate::println!("=================================");
+            }
+
             "test" | "selftest" => {
                 crate::println!("============ AURAOS KERNEL SELF-TEST SUITE ============");
                 let results = crate::tests::run_all_tests();
@@ -778,30 +1085,11 @@ impl Shell {
             }
 
             "reboot" => {
-                crate::println!("Restarting AuraOS...");
-                unsafe {
-                    // Pulse reset line via 8042 keyboard controller (port 0x64, command 0xFE)
-                    outb(0x64, 0xFE);
-                }
+                crate::arch::power::reboot();
             }
 
             "shutdown" | "poweroff" => {
-                crate::println!("Powering off system via ACPI...");
-                unsafe {
-                    // Modern QEMU ACPI poweroff
-                    crate::arch::io::outw(0x604, 0x2000);
-                    // Legacy Bochs / older QEMU
-                    crate::arch::io::outw(0xB004, 0x2000);
-                    // VirtualBox ACPI shutdown
-                    crate::arch::io::outw(0x4004, 0x3400);
-                    // Cloud Hypervisor
-                    crate::arch::io::outw(0x600, 0x34);
-
-                    crate::println!("ACPI poweroff triggered. Halting CPU.");
-                    loop {
-                        core::arch::asm!("cli; hlt", options(nomem, nostack, preserves_flags));
-                    }
-                }
+                crate::arch::power::shutdown();
             }
 
             "halt" => {
@@ -838,5 +1126,49 @@ fn parse_u64(s: &str) -> Result<u64, ()> {
     Ok(acc)
 }
 
+/// Parses a dotted-decimal IPv4 address string (e.g. "10.0.2.2") into [u8; 4].
+fn parse_ipv4(s: &str) -> Option<[u8; 4]> {
+    let s = s.trim();
+    let mut octets = [0u8; 4];
+    let mut idx = 0;
+    for part in s.split('.') {
+        if idx >= 4 {
+            return None;
+        }
+        match parse_u64(part) {
+            Ok(v) if v <= 255 => octets[idx] = v as u8,
+            _ => return None,
+        }
+        idx += 1;
+    }
+    if idx == 4 { Some(octets) } else { None }
+}
+
 /// Global singleton instance of the AuraOS Shell, synchronized with a Spinlock.
 pub static SHELL: Spinlock<Shell> = Spinlock::new(Shell::new());
+
+/// Submits the current line: extracts command, releases the SHELL lock (re-enabling interrupts),
+/// executes the command with interrupts active, and prints the new prompt.
+pub fn on_enter() {
+    let mut cmd_buf = alloc::string::String::new();
+    {
+        crate::println!();
+        let mut shell = SHELL.lock();
+        if shell.length > 0 {
+            let len = shell.length;
+            shell.length = 0;
+            if let Ok(line) = core::str::from_utf8(&shell.buffer[..len]) {
+                let trimmed = line.trim();
+                if !trimmed.is_empty() {
+                    cmd_buf.push_str(trimmed);
+                }
+            }
+        }
+    }
+
+    if !cmd_buf.is_empty() {
+        Shell::execute(&cmd_buf);
+    }
+
+    crate::print!("auraos> ");
+}
