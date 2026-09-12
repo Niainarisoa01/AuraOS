@@ -7,8 +7,7 @@
 //! architecture, enabling isolated Ring 3 services and user tasks to exchange
 //! structured payloads securely.
 
-use alloc::collections::VecDeque;
-use alloc::vec::Vec;
+use alloc::collections::{BTreeMap, VecDeque};
 use crate::sync::Spinlock;
 
 /// Maximum payload size per IPC message (bytes).
@@ -63,7 +62,7 @@ impl Message {
 
 /// Global IPC Message Router managing process mailboxes.
 pub struct IpcRouter {
-    mailboxes: Vec<(usize, VecDeque<Message>)>,
+    mailboxes: BTreeMap<usize, VecDeque<Message>>,
     pub total_sent: u64,
     pub total_delivered: u64,
 }
@@ -71,7 +70,7 @@ pub struct IpcRouter {
 impl IpcRouter {
     pub const fn new() -> Self {
         IpcRouter {
-            mailboxes: Vec::new(),
+            mailboxes: BTreeMap::new(),
             total_sent: 0,
             total_delivered: 0,
         }
@@ -79,14 +78,9 @@ impl IpcRouter {
 
     /// Finds or creates a mailbox for the given target PID.
     fn get_or_create_mailbox(&mut self, pid: usize) -> &mut VecDeque<Message> {
-        let pos = self.mailboxes.iter().position(|(id, _)| *id == pid);
-        if let Some(idx) = pos {
-            &mut self.mailboxes[idx].1
-        } else {
-            self.mailboxes.push((pid, VecDeque::with_capacity(MAILBOX_CAPACITY)));
-            let last_idx = self.mailboxes.len() - 1;
-            &mut self.mailboxes[last_idx].1
-        }
+        self.mailboxes
+            .entry(pid)
+            .or_insert_with(|| VecDeque::with_capacity(MAILBOX_CAPACITY))
     }
 
     /// Sends a message to `target_pid`.
@@ -103,9 +97,8 @@ impl IpcRouter {
 
     /// Retrieves the next available message for `my_pid` (FIFO).
     pub fn receive(&mut self, my_pid: usize) -> Option<Message> {
-        let pos = self.mailboxes.iter().position(|(id, _)| *id == my_pid);
-        if let Some(idx) = pos {
-            let msg = self.mailboxes[idx].1.pop_front();
+        if let Some(mailbox) = self.mailboxes.get_mut(&my_pid) {
+            let msg = mailbox.pop_front();
             if msg.is_some() {
                 self.total_delivered += 1;
             }
@@ -118,11 +111,7 @@ impl IpcRouter {
     /// Returns the number of messages waiting in `pid`'s mailbox.
     #[allow(dead_code)]
     pub fn pending_count(&self, pid: usize) -> usize {
-        self.mailboxes
-            .iter()
-            .find(|(id, _)| *id == pid)
-            .map(|(_, q)| q.len())
-            .unwrap_or(0)
+        self.mailboxes.get(&pid).map(|q| q.len()).unwrap_or(0)
     }
 
     /// Returns total active mailboxes.

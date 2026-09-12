@@ -66,48 +66,16 @@ pub const SYS_RECV: u64 = 61;
 #[allow(dead_code)]
 pub const SYS_TIME: u64 = 201;
 
-/// Read a Model-Specific Register (MSR)
-#[inline]
-unsafe fn rdmsr(msr: u32) -> u64 {
-    let low: u32;
-    let high: u32;
-    unsafe {
-        core::arch::asm!(
-            "rdmsr",
-            in("ecx") msr,
-            out("eax") low,
-            out("edx") high,
-            options(nomem, nostack, preserves_flags)
-        );
-    }
-    ((high as u64) << 32) | (low as u64)
-}
+use crate::arch::msr::{rdmsr, wrmsr};
 
-/// Write a Model-Specific Register (MSR)
-#[inline]
-unsafe fn wrmsr(msr: u32, value: u64) {
-    let low = value as u32;
-    let high = (value >> 32) as u32;
-    unsafe {
-        core::arch::asm!(
-            "wrmsr",
-            in("ecx") msr,
-            in("eax") low,
-            in("edx") high,
-            options(nomem, nostack, preserves_flags)
-        );
-    }
-}
-
-/// Scratch variables for switching between user and kernel stacks on syscall
-pub static mut USER_RSP_SCRATCH: u64 = 0;
-pub static mut KERNEL_RSP_SCRATCH: u64 = 0;
+/// Scratch variables for switching between user and kernel stacks on syscall.
+/// Using AtomicU64 instead of `static mut` for future SMP safety.
+pub static USER_RSP_SCRATCH: AtomicU64 = AtomicU64::new(0);
+pub static KERNEL_RSP_SCRATCH: AtomicU64 = AtomicU64::new(0);
 
 /// Updates the kernel stack pointer used on syscall entry
 pub fn set_kernel_rsp(rsp: u64) {
-    unsafe {
-        KERNEL_RSP_SCRATCH = rsp;
-    }
+    KERNEL_RSP_SCRATCH.store(rsp, Ordering::Release);
 }
 
 /// The kernel-side syscall entry point.
@@ -140,13 +108,19 @@ unsafe extern "C" fn syscall_entry() {
         "push r14",
         "push r15",
 
-        // 4. Call the Rust syscall dispatcher
-        // RAX = syscall number (already in rax)
+        // 4. Push syscall number (RAX) onto kernel stack as 7th argument
+        //    This is read by syscall_dispatch before the compiler can clobber RAX.
+        "push rax",
+
+        // 5. Call the Rust syscall dispatcher
         // RDI, RSI, RDX, R10, R8, R9 = args (R10 replaces RCX per syscall ABI)
         "mov rcx, r10",             // Restore 4th arg from R10 to RCX (C calling convention)
         "call {handler}",
 
-        // 5. Restore callee-saved registers
+        // 6. Pop the saved syscall number (balance the push)
+        "add rsp, 8",
+
+        // 7. Restore callee-saved registers
         "pop r15",
         "pop r14",
         "pop r13",
@@ -165,7 +139,10 @@ unsafe extern "C" fn syscall_entry() {
 }
 
 /// Rust-level syscall dispatcher.
-/// Called from the naked assembly entry point with the syscall number in RAX.
+/// Called from the naked assembly entry point. The syscall number was pushed
+/// onto the kernel stack before the `call` and sits at [RSP + 0] on entry,
+/// but due to the C ABI call frame it's located at a known stack offset.
+/// We read it via a 7th stack-passed implicit argument.
 #[allow(unused_variables)]
 extern "C" fn syscall_dispatch(
     arg1: u64,  // RDI
@@ -175,12 +152,16 @@ extern "C" fn syscall_dispatch(
     arg5: u64,  // R8
     arg6: u64,  // R9
 ) -> u64 {
-    // The syscall number is in RAX, but the C ABI doesn't pass it as an argument.
-    // We read it from the saved state. For now, use a simpler approach:
-    // the caller will have placed syscall number in RAX before the `syscall` instruction.
+    // The syscall number was pushed onto the stack before the `call` instruction.
+    // In the C calling convention, the return address is at [RSP], so the pushed
+    // syscall number is at [RSP + 8] (i.e., just above the return address).
     let syscall_nr: u64;
     unsafe {
-        core::arch::asm!("", out("rax") syscall_nr, options(nomem, nostack));
+        core::arch::asm!(
+            "mov {}, [rsp + 8]",
+            out(reg) syscall_nr,
+            options(nomem, nostack)
+        );
     }
 
     SYSCALL_COUNT.fetch_add(1, Ordering::Relaxed);

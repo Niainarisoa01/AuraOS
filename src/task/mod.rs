@@ -362,14 +362,55 @@ pub fn kill_task(id: usize) -> bool {
     if id == 0 {
         return false;
     }
+    let killed = {
+        let mut sched = SCHEDULER.lock();
+        let mut found = false;
+        for task in sched.tasks.iter_mut() {
+            if task.id == id && task.state != TaskState::Dead {
+                task.state = TaskState::Dead;
+                found = true;
+                break;
+            }
+        }
+        found
+    };
+    if killed {
+        reap_dead_tasks();
+    }
+    killed
+}
+
+/// Reaps dead tasks by removing them from the scheduler and freeing their stacks.
+/// Task 0 (kernel shell) and the currently running task are never reaped.
+/// Returns the number of tasks reaped.
+#[allow(dead_code)]
+pub fn reap_dead_tasks() -> usize {
     let mut sched = SCHEDULER.lock();
-    for task in sched.tasks.iter_mut() {
-        if task.id == id && task.state != TaskState::Dead {
-            task.state = TaskState::Dead;
-            return true;
+    let curr = sched.current;
+    let mut reaped = 0;
+    let mut i = sched.tasks.len();
+
+    // Iterate backwards to avoid index invalidation issues
+    while i > 0 {
+        i -= 1;
+        if i == 0 || i == curr {
+            continue; // Never reap task 0 or the currently running task
+        }
+        if sched.tasks[i].state == TaskState::Dead {
+            // Drop the task (its Box<[u8]> stack will be freed)
+            sched.tasks.remove(i);
+            reaped += 1;
+            // Adjust current index if it was after the removed element
+            if curr > i {
+                sched.current -= 1;
+            }
         }
     }
-    false
+
+    if reaped > 0 {
+        crate::serial_println!("[Scheduler] Reaped {} dead task(s), {} remaining", reaped, sched.tasks.len());
+    }
+    reaped
 }
 
 /// Cooperatively yields execution to the next ready task.

@@ -6,6 +6,7 @@
 //! and low-level port I/O primitives.
 
 pub mod io;
+pub mod msr;
 pub mod gdt;
 pub mod idt;
 pub mod pic;

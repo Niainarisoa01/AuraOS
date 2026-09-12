@@ -29,6 +29,7 @@ pub enum InodeKind {
     DevNull,
     DevZero,
     DevRandom,
+    Tombstone,
 }
 
 #[allow(dead_code)]
@@ -49,7 +50,7 @@ impl Inode {
             InodeKind::File { content } => content.len(),
             InodeKind::Directory { children } => children.len(),
             InodeKind::ProcFile { .. } => 0,
-            InodeKind::DevNull | InodeKind::DevZero | InodeKind::DevRandom => 0,
+            InodeKind::DevNull | InodeKind::DevZero | InodeKind::DevRandom | InodeKind::Tombstone => 0,
         }
     }
 }
@@ -63,6 +64,7 @@ pub struct DirectoryEntry {
 pub struct Vfs {
     pub inodes: Vec<Inode>,
     pub current_inode: usize,
+    pub free_inodes: Vec<usize>,
 }
 
 impl Vfs {
@@ -71,12 +73,36 @@ impl Vfs {
         Vfs {
             inodes: Vec::new(),
             current_inode: 0,
+            free_inodes: Vec::new(),
+        }
+    }
+
+    /// Allocates an inode ID, reusing a tombstone slot if available or allocating a new slot.
+    fn allocate_inode(&mut self, parent_id: usize, name: &str, kind: InodeKind) -> usize {
+        if let Some(reused_id) = self.free_inodes.pop() {
+            self.inodes[reused_id] = Inode {
+                id: reused_id,
+                parent_id,
+                name: String::from(name),
+                kind,
+            };
+            reused_id
+        } else {
+            let new_id = self.inodes.len();
+            self.inodes.push(Inode {
+                id: new_id,
+                parent_id,
+                name: String::from(name),
+                kind,
+            });
+            new_id
         }
     }
 
     /// Initializes the root filesystem and populates standard system files.
     pub fn init(&mut self) {
         self.inodes.clear();
+        self.free_inodes.clear();
 
         // Inode 0: Root directory "/"
         self.inodes.push(Inode {
@@ -203,13 +229,11 @@ impl Vfs {
             }
         }
 
-        let new_id = self.inodes.len();
-        self.inodes.push(Inode {
-            id: new_id,
+        let new_id = self.allocate_inode(
             parent_id,
-            name: String::from(name),
-            kind: InodeKind::Directory { children: Vec::new() },
-        });
+            name,
+            InodeKind::Directory { children: Vec::new() },
+        );
 
         if let InodeKind::Directory { children } = &mut self.inodes[parent_id].kind {
             children.push(new_id);
@@ -239,15 +263,13 @@ impl Vfs {
             }
         }
 
-        let new_id = self.inodes.len();
-        self.inodes.push(Inode {
-            id: new_id,
+        let new_id = self.allocate_inode(
             parent_id,
-            name: String::from(name),
-            kind: InodeKind::File {
+            name,
+            InodeKind::File {
                 content: content.to_vec(),
             },
-        });
+        );
 
         if let InodeKind::Directory { children } = &mut self.inodes[parent_id].kind {
             children.push(new_id);
@@ -285,13 +307,7 @@ impl Vfs {
         if !self.inodes[parent_id].is_dir() {
             return Err("Parent is not a directory");
         }
-        let new_id = self.inodes.len();
-        self.inodes.push(Inode {
-            id: new_id,
-            parent_id,
-            name: String::from(name),
-            kind: InodeKind::ProcFile { generator },
-        });
+        let new_id = self.allocate_inode(parent_id, name, InodeKind::ProcFile { generator });
 
         if let InodeKind::Directory { children } = &mut self.inodes[parent_id].kind {
             children.push(new_id);
@@ -310,13 +326,7 @@ impl Vfs {
         if !self.inodes[parent_id].is_dir() {
             return Err("Parent is not a directory");
         }
-        let new_id = self.inodes.len();
-        self.inodes.push(Inode {
-            id: new_id,
-            parent_id,
-            name: String::from(name),
-            kind,
-        });
+        let new_id = self.allocate_inode(parent_id, name, kind);
 
         if let InodeKind::Directory { children } = &mut self.inodes[parent_id].kind {
             children.push(new_id);
@@ -334,6 +344,7 @@ impl Vfs {
             InodeKind::DevZero => Ok(Cow::Owned(alloc::vec![0u8; 64])),
             InodeKind::DevRandom => Ok(Cow::Owned(dev_random_generator())),
             InodeKind::Directory { .. } => Err("Cannot read directory as file"),
+            InodeKind::Tombstone => Err("Cannot read deleted file"),
         }
     }
 
@@ -379,21 +390,13 @@ impl Vfs {
             return Err("Entry not found in parent");
         }
 
-        // Free memory by clearing content/children of all removed inodes
+        // Free memory by marking removed inodes as tombstones and adding to free-list
         for &id in &to_clean {
-            match &mut self.inodes[id].kind {
-                InodeKind::File { content } => {
-                    content.clear();
-                    content.shrink_to_fit();
-                }
-                InodeKind::Directory { children } => {
-                    children.clear();
-                    children.shrink_to_fit();
-                }
-                _ => {}
-            }
+            self.inodes[id].kind = InodeKind::Tombstone;
             self.inodes[id].name.clear();
             self.inodes[id].name.shrink_to_fit();
+            self.inodes[id].parent_id = 0;
+            self.free_inodes.push(id);
         }
 
         Ok(())
@@ -425,18 +428,24 @@ pub fn init() {
 
 fn proc_uptime_generator() -> Vec<u8> {
     let ticks = crate::arch::idt::ticks();
-    // PIT tick rate is ~18.2 Hz (approx 55 ms per tick)
-    let seconds = ticks / 18;
-    let ms = (ticks % 18) * 55;
-    alloc::format!("uptime: {}.{:03} seconds ({} timer ticks)\n", seconds, ms, ticks).into_bytes()
+    // PIT is configured at 100 Hz (10 ms per tick) in drivers/pit.rs
+    let freq = crate::drivers::pit::TARGET_FREQUENCY as u64;
+    let seconds = ticks / freq;
+    let ms = (ticks % freq) * (1000 / freq);
+    alloc::format!("uptime: {}.{:03} seconds ({} timer ticks @ {} Hz)\n", seconds, ms, ticks, freq).into_bytes()
 }
 
 fn proc_meminfo_generator() -> Vec<u8> {
+    let total_kb = crate::memory::allocator::HEAP_SIZE / 1024;
+    let free_kb = crate::memory::allocator::free_memory() / 1024;
+    let used_kb = crate::memory::allocator::used_memory() / 1024;
     alloc::format!(
-        "MemTotal:        8192 kB\n\
-         MemFree:         4096 kB\n\
-         HeapCapacity:    8192 kB (8 MiB Coalescing Allocator)\n\
-         PagingModel:     4-Level x86_64 Long Mode (PML4)\n"
+        "MemTotal:        {} kB\n\
+         MemFree:         {} kB\n\
+         MemUsed:         {} kB\n\
+         HeapCapacity:    {} kB ({} MiB Coalescing Allocator)\n\
+         PagingModel:     4-Level x86_64 Long Mode (PML4)\n",
+        total_kb, free_kb, used_kb, total_kb, total_kb / 1024
     ).into_bytes()
 }
 
@@ -469,13 +478,44 @@ fn proc_tasks_generator() -> Vec<u8> {
 }
 
 fn dev_random_generator() -> Vec<u8> {
+    let cpu = crate::arch::cpuid::get_cpu_info();
     let mut bytes = alloc::vec::Vec::with_capacity(32);
-    let mut seed = crate::arch::cpuid::rdtsc();
-    for _ in 0..32 {
-        seed ^= seed << 13;
-        seed ^= seed >> 7;
-        seed ^= seed << 17;
-        bytes.push((seed & 0xFF) as u8);
+
+    if cpu.has_rdrand {
+        // Use hardware RDRAND for cryptographically stronger randomness
+        for _ in 0..4 {
+            let val: u64;
+            let ok: u8;
+            unsafe {
+                core::arch::asm!(
+                    "rdrand {val}",
+                    "setc {ok}",
+                    val = out(reg) val,
+                    ok = out(reg_byte) ok,
+                    options(nomem, nostack)
+                );
+            }
+            if ok != 0 {
+                bytes.extend_from_slice(&val.to_le_bytes());
+            } else {
+                // RDRAND failed, fill with TSC-seeded fallback
+                let fb = crate::arch::cpuid::rdtsc().wrapping_mul(6364136223846793005).wrapping_add(1);
+                bytes.extend_from_slice(&fb.to_le_bytes());
+            }
+        }
+    } else {
+        // Fallback: improved XorShift64* seeded from RDTSC
+        let mut seed = crate::arch::cpuid::rdtsc();
+        if seed == 0 { seed = 0xDEAD_BEEF_CAFE_BABE; }
+        for _ in 0..4 {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed = seed.wrapping_mul(0x2545F4914F6CDD1D); // XorShift64*
+            bytes.extend_from_slice(&seed.to_le_bytes());
+        }
     }
+
+    bytes.truncate(32);
     bytes
 }

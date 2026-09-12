@@ -43,38 +43,7 @@ pub const REG_TIMER_DIV: u32 = 0x03E0;       // Timer Divide Configuration Regis
 pub const SVR_APIC_SOFTWARE_ENABLE: u32 = 1 << 8; // Bit 8: APIC Software Enable
 pub const SVR_SPURIOUS_VECTOR: u32 = 0xFF;        // Vector 255 (standard spurious vector)
 
-/// Reads a 64-bit Model-Specific Register (MSR).
-#[inline]
-pub unsafe fn rdmsr(msr: u32) -> u64 {
-    let low: u32;
-    let high: u32;
-    unsafe {
-        core::arch::asm!(
-            "rdmsr",
-            in("ecx") msr,
-            out("eax") low,
-            out("edx") high,
-            options(nomem, nostack, preserves_flags)
-        );
-    }
-    ((high as u64) << 32) | (low as u64)
-}
-
-/// Writes a 64-bit Model-Specific Register (MSR).
-#[inline]
-pub unsafe fn wrmsr(msr: u32, value: u64) {
-    let low = value as u32;
-    let high = (value >> 32) as u32;
-    unsafe {
-        core::arch::asm!(
-            "wrmsr",
-            in("ecx") msr,
-            in("eax") low,
-            in("edx") high,
-            options(nomem, nostack, preserves_flags)
-        );
-    }
-}
+pub use crate::arch::msr::{rdmsr, wrmsr};
 
 /// Local APIC Controller Instance.
 pub struct LocalApic {

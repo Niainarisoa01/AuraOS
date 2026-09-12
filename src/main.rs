@@ -194,11 +194,23 @@ pub extern "C" fn _start() -> ! {
     }
 }
 
+static PANICKING: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+
 /// Invoked on panic. Prints error message and halts CPU.
 #[panic_handler]
 fn panic(info: &PanicInfo) -> ! {
     unsafe {
         core::arch::asm!("cli", options(nomem, nostack));
+    }
+
+    if PANICKING.swap(true, core::sync::atomic::Ordering::SeqCst) {
+        // Recursive panic detected: halt immediately to avoid stack overflow / triple fault
+        loop {
+            unsafe { core::arch::asm!("hlt", options(nomem, nostack)) };
+        }
+    }
+
+    unsafe {
         // Safely force unlock output devices in case panic occurred inside print!
         drivers::vga::WRITER.force_unlock();
         drivers::serial::SERIAL1.force_unlock();
