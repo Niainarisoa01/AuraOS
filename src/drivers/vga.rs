@@ -208,7 +208,9 @@ macro_rules! println {
 pub fn _print(args: fmt::Arguments) {
     use core::fmt::Write;
     WRITER.lock().write_fmt(args).unwrap();
-    crate::drivers::serial::SERIAL1.lock().write_fmt(args).ok();
+    // I1: Serial output goes through per-CPU buffer (no global SERIAL1 lock).
+    // serial::_print handles the fallback to direct lock during early boot.
+    crate::drivers::serial::_print(args);
 }
 
 /// Erases the last character displayed on the screen.

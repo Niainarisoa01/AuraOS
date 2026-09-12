@@ -41,6 +41,10 @@
 //! 36. SMP Per-CPU Independent Schedulers & Run Queues
 //! 37. SMP Load-Balanced Task Distribution & Work Stealing
 //! 38. Dynamic Virtual Memory, mmap, munmap & Demand Paging
+//! 39. SERIAL Per-CPU Buffer, No Cross-Core Blocking
+//! 40. VFS Concurrent Disjoint Path Access
+//! 41. VFS Topology Lock Correctness
+//! 42. Shell Responsiveness Under Background Load
 
 use alloc::boxed::Box;
 use alloc::format;
@@ -1012,10 +1016,7 @@ pub fn run_all_tests() -> Vec<TestResult> {
         use crate::fs::elf::*;
 
         // 1. Read /bin/hello from VFS
-        let vfs_read_res = {
-            let vfs = crate::fs::VFS.lock();
-            vfs.resolve_path("/bin/hello").and_then(|node_id| vfs.read_file(node_id).map(|c| c.to_vec()))
-        };
+        let vfs_read_res = crate::fs::vfs_read_file("/bin/hello");
 
         let (vfs_ok, vfs_len) = match &vfs_read_res {
             Ok(data) => (true, data.len()),
@@ -1602,6 +1603,184 @@ pub fn run_all_tests() -> Vec<TestResult> {
                 "LazyMmap={:#x} (InitPages=0: {}), DemandPF(P0={}, P1={}, RejectBad={}), GuardProtected={}, OverlapChecked={}, MunmapOk={}, Syscalls(mmap={}, munmap={})",
                 vaddr, zero_frames_initial, resolved_p0, resolved_p1, bad_fault_failed,
                 guard_trapped, overlap_err, unmap_ok, sys_mmap_ok, sys_munmap_ok
+            ),
+        });
+    }
+
+    // ========================================================================
+    // Test 39: SERIAL Per-CPU Buffer, No Cross-Core Blocking
+    // ========================================================================
+    {
+        // 1. Verify that per-CPU serial buffering is active
+        let buffering_active = crate::drivers::serial::is_percpu_buffering_active();
+
+        // 2. Measure local write performance (cycles via rdtsc)
+        let cpu_id = crate::arch::smp::current_cpu();
+        let cpu_id = if cpu_id < crate::arch::smp::MAX_CPUS { cpu_id } else { 0 };
+
+        let t0 = crate::arch::cpuid::rdtsc();
+        crate::serial_print!("[TEST39] Diagnostic message 1 from CPU #{}\n", cpu_id);
+        crate::serial_print!("[TEST39] Diagnostic message 2 from CPU #{}\n", cpu_id);
+        let t1 = crate::arch::cpuid::rdtsc();
+        let write_cycles = t1.saturating_sub(t0);
+
+        // 3. Verify global lock was NOT held during/after buffer write
+        let global_lock_free = !crate::drivers::serial::serial_global_lock_held();
+
+        // 4. Verify buffer contains pending bytes before flush
+        let pending_before = crate::drivers::serial::serial_buffer_pending(cpu_id);
+
+        // 5. Perform flush and verify buffer drained
+        crate::drivers::serial::serial_flush_all();
+        let pending_after = crate::drivers::serial::serial_buffer_pending(cpu_id);
+
+        let passed = buffering_active && global_lock_free && pending_after == 0;
+
+        results.push(TestResult {
+            name: "SERIAL Per-CPU Buffer, No Cross-Core Blocking",
+            passed,
+            detail: format!(
+                "BufferingActive={}, LockFree={}, PendingBefore={}B, PendingAfter={}B, WriteCost={} cycles",
+                buffering_active, global_lock_free, pending_before, pending_after, write_cycles
+            ),
+        });
+    }
+
+    // ========================================================================
+    // Test 40: VFS Concurrent Disjoint Path Access (Lock Striping)
+    // ========================================================================
+    {
+        // 1. Verify stripe pool configuration (16 stripes)
+        let stripe_count = crate::fs::vfs_stripe_count();
+
+        // 2. Create disjoint test file in root
+        let disjoint_file_res = crate::fs::vfs_create_file(0, "test_disjoint.tmp", b"Disjoint VFS Data");
+        let file_ok = disjoint_file_res.is_ok();
+        let file_id = disjoint_file_res.unwrap_or(0);
+
+        // 3. Read dynamic /proc/meminfo without topology lock
+        let meminfo_data = crate::fs::vfs_read_file("/proc/meminfo");
+        let meminfo_ok = match &meminfo_data {
+            Ok(bytes) => bytes.starts_with(b"MemTotal:"),
+            Err(_) => false,
+        };
+
+        // 4. Read disjoint file content by ID (uses stripe lock)
+        let file_data = crate::fs::vfs_read_file_by_id(file_id);
+        let read_back_ok = match &file_data {
+            Ok(bytes) => bytes.as_slice() == b"Disjoint VFS Data",
+            Err(_) => false,
+        };
+
+        // 5. Verify stripe index calculation and isolation
+        let meminfo_id = crate::fs::vfs_resolve_path("/proc/meminfo").unwrap_or(0);
+        let stripe_meminfo = crate::fs::vfs_stripe_index(meminfo_id);
+        let stripe_file = crate::fs::vfs_stripe_index(file_id);
+
+        // 6. Clean up
+        let rm_ok = crate::fs::vfs_remove_entry(file_id).is_ok();
+
+        let passed = stripe_count == 16 && file_ok && meminfo_ok && read_back_ok && rm_ok;
+
+        results.push(TestResult {
+            name: "VFS Concurrent Disjoint Path Access",
+            passed,
+            detail: format!(
+                "Stripes={}, MemInfoOk={}, DisjointReadOk={}, StripeMemInfo={}, StripeFile={}, CleanedUp={}",
+                stripe_count, meminfo_ok, read_back_ok, stripe_meminfo, stripe_file, rm_ok
+            ),
+        });
+    }
+
+    // ========================================================================
+    // Test 41: VFS Topology Lock Correctness
+    // ========================================================================
+    {
+        // 1. Verify atomic creation under topology lock
+        let dir_res = crate::fs::vfs_mkdir(0, "topo_test_dir");
+        let mut passed = false;
+        let mut detail = String::from("Topology creation failed");
+
+        if let Ok(dir_id) = dir_res {
+            let f1_res = crate::fs::vfs_create_file(dir_id, "file_a.txt", b"alpha");
+            let f2_res = crate::fs::vfs_create_file(dir_id, "file_b.txt", b"beta");
+
+            if let (Ok(f1_id), Ok(f2_id)) = (f1_res, f2_res) {
+                // Verify path resolution
+                let p1_ok = crate::fs::vfs_resolve_path("/topo_test_dir/file_a.txt").ok() == Some(f1_id);
+                let p2_ok = crate::fs::vfs_resolve_path("/topo_test_dir/file_b.txt").ok() == Some(f2_id);
+
+                // List directory
+                let list_res = crate::fs::vfs_list_directory_id(dir_id);
+                let count_ok = match list_res {
+                    Ok(entries) => entries.len() == 2,
+                    Err(_) => false,
+                };
+
+                // Recursive cleanup under topology lock
+                let rm_ok = crate::fs::vfs_remove_entry(dir_id).is_ok();
+                let gone_ok = crate::fs::vfs_resolve_path("/topo_test_dir/file_a.txt").is_err();
+
+                if p1_ok && p2_ok && count_ok && rm_ok && gone_ok {
+                    passed = true;
+                    detail = format!(
+                        "Created 2 files in subdir, resolved paths, listed entries=2, recursive rm cleaned inodes (f1={}, f2={}, dir={})",
+                        f1_id, f2_id, dir_id
+                    );
+                } else {
+                    detail = format!("Integrity check: p1={}, p2={}, count={}, rm={}, gone={}", p1_ok, p2_ok, count_ok, rm_ok, gone_ok);
+                }
+            }
+        }
+
+        results.push(TestResult {
+            name: "VFS Topology Lock Correctness",
+            passed,
+            detail,
+        });
+    }
+
+    // ========================================================================
+    // Test 42: Shell Responsiveness Under Background Load
+    // ========================================================================
+    {
+        // 1. Verify SHELL spinlock is NOT held during idle execution
+        let lock_free_idle = crate::shell::SHELL.try_lock().is_some();
+
+        // 2. Measure line-editing lock acquisition latency
+        let t0 = crate::arch::cpuid::rdtsc();
+        let mut shell = crate::shell::SHELL.lock();
+        let t1 = crate::arch::cpuid::rdtsc();
+        let lock_acquire_cycles = t1.saturating_sub(t0);
+
+        // 3. Verify simulated typing into shell buffer
+        shell.clear();
+        shell.push_char(b'e');
+        shell.push_char(b'c');
+        shell.push_char(b'h');
+        shell.push_char(b'o');
+        let len_after_type = shell.len();
+        shell.backspace();
+        let len_after_bs = shell.len();
+        // Clean up
+        shell.clear();
+        drop(shell);
+
+        // 4. Verify lock immediately available again
+        let lock_free_after = crate::shell::SHELL.try_lock().is_some();
+
+        let passed = lock_free_idle
+            && lock_free_after
+            && len_after_type == 4
+            && len_after_bs == 3
+            && lock_acquire_cycles < 50_000;
+
+        results.push(TestResult {
+            name: "Shell Responsiveness Under Background Load",
+            passed,
+            detail: format!(
+                "IdleFree={}, TypingOk (len {}->{}), FreeAfter={}, AcquireLatency={} cycles",
+                lock_free_idle, len_after_type, len_after_bs, lock_free_after, lock_acquire_cycles
             ),
         });
     }

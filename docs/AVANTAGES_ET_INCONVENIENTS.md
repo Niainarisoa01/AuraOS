@@ -258,13 +258,14 @@ Le sous-système ACPI (`src/arch/acpi.rs`) ne se limite pas à la lecture :
 
 ---
 
-## ✅ Inconvénients Entièrement Résolus (17)
+## ✅ Inconvénients Entièrement Résolus (18)
 
-> Les 17 points ci-dessous représentaient des limitations ou des anomalies critiques des versions antérieures. Tous ont été résolus dans le code source actuel et validés par compilation et tests QEMU.
+> Les 18 points ci-dessous représentaient des limitations ou des anomalies critiques des versions antérieures. Tous ont été résolus dans le code source actuel et validés par compilation et tests QEMU.
 
 | # | Anomalie ou Manque Initial | Résolution & Implémentation Actuelle | Référence Fichier |
 |:---:|:---|:---|:---|
 | **I1** | Calcul `/proc/uptime` faussé (18.2 Hz vs 100 Hz) | Utilisation de la constante de fréquence réelle `TARGET_FREQUENCY = 100` issue du timer | `src/fs/mod.rs` |
+| **I1-SMP** | **Mono-rédacteur global (SERIAL / Shell / VFS)** | **Élimination de la contention SMP globale :** ring buffers 8 KiB per-CPU (`SERIAL_BUFFERS`), flusher unique BSP (100 Hz LAPIC), lock striping VFS (16 verrous d'inodes) avec isolation topologie vs contenu, verrou fin sur l'édition de ligne du shell, tests #39–#42 | `src/drivers/serial.rs`, `src/fs/mod.rs`, `src/shell/mod.rs` |
 | **I2** | Numéro de syscall non fiable (écrasement `RAX`) | Capture atomique immédiate de `RAX` dans une variable scratch au point d'entrée assembleur nu avant tout dispatch | `src/arch/syscall.rs` |
 | **I3** | Utilisation de `static mut` dans le dispatch syscall | Remplacement intégral par des primitives atomiques `AtomicU64` thread-safe | `src/arch/syscall.rs` |
 | **I4** | **Absence totale de support SMP multi-cœurs** | **SMP multi-cœur préemptif complet :** INIT-SIPI-SIPI, GDT/TSS per-CPU, timers LAPIC 0x40 (~100 Hz), Schedulers per-CPU, work stealing, tests #35–#37 | `src/arch/smp.rs`, `src/task/mod.rs` |
@@ -370,9 +371,10 @@ Le fichier `src/shell/mod.rs` regroupe environ 1 180 lignes de code dans une fon
 | **A10** | Multiprocesseur | — | Support SMP complet : INIT-SIPI-SIPI, PerCpu, LAPIC 0x40, Schedulers Per-CPU | ✅ **Excellence** |
 | **A11** | Mémoire | — | PMM Frame Allocator (E820 / Bitmap) & VMM Demand Paging (`mmap`/`munmap`) | ✅ **Excellence** |
 | **A12–A13** | E/S & Réseau | — | Pile réseau L2–L4 (5 protocoles), VFS dynamique `/proc` et `/dev` | ✅ **Excellence** |
-| **A14–A15** | Système & UI | — | 38 tests automatisés (100%), Shell 25+ commandes, Bureau graphique BGA | ✅ **Excellence** |
+| **A14–A15** | Système & UI | — | 42 tests automatisés (100%), Shell 25+ commandes, Bureau graphique BGA | ✅ **Excellence** |
 | **A16–A17** | Matériel | — | Gestion ACPI S5 Soft-off, Binaire léger 522 Ko, Boot < 100 ms | ✅ **Excellence** |
 | **I1** | Système | 🟡 | Erreur de fréquence `/proc/uptime` (18.2 Hz) | ✅ **Corrigé** |
+| **I1-SMP** | Concurrence | 🔴 | Mono-rédacteur global SMP (SERIAL/Shell/VFS) | ✅ **Corrigé (Chantier I1 fait)** |
 | **I2** | Syscall | 🔴 | Numéro de syscall écrasé par `RAX` | ✅ **Corrigé** |
 | **I3** | Concurrence | 🔴 | `static mut` dans le chemin critique des syscalls | ✅ **Corrigé** |
 | **I4** | Architecture | 🔴 | Monoprocesseur strict (aucun support SMP) | ✅ **Corrigé (Chantier I4 fait)** |
@@ -403,10 +405,11 @@ Le fichier `src/shell/mod.rs` regroupe environ 1 180 lignes de code dans une fon
 ## 🗺️ Plan d'Action & Feuille de Route Actualisée
 
 ### 🎯 Étape Actuelle : Stabilité & Consolidation Immédiate
+- ✅ **I1 (Mono-rédacteur SMP)** : Finalisé et validé à 100% sur 2 et 4 cœurs (Tests #39, #40, #41, #42).
 - ✅ **I4 (SMP)** : Finalisé et validé à 100% sur 4 cœurs sous QEMU (Tests #35, #36, #37).
 - ✅ **I5 (PMM)** : Finalisé et intégré à la gestion des espaces d'adressage (Test #34).
 - ✅ **I6 (Demand Paging & mmap)** : Finalisé et validé à 100% (Test #38) avec gestionnaire #PF transparent, VMAs, pages de garde et libération PMM.
-- ✅ **Banc de tests** : 38 tests automatisés validés à 100% sans aucun warning de compilation.
+- ✅ **Banc de tests** : 42 tests automatisés validés à 100% sans aucun warning de compilation.
 
 ### 🔜 Prochaine Priorité (Court terme — 1 à 2 semaines)
 1. **Refactorisation du Shell (I13)** : Scission de `src/shell/mod.rs` en sous-modules (`parser`, `builtins`, `commands`) et support des pipes basiques.

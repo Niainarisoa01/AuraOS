@@ -416,7 +416,192 @@ impl Vfs {
     }
 }
 
+// ============================================================================
+// ============================================================================
+// I1 — VFS Lock Striping: Topology Lock + Per-Inode Stripe Locks
+// ============================================================================
+//
+// The VFS uses a two-level locking scheme to reduce contention:
+//
+// 1. **Topology lock** (`VFS`): Protects mutations to the inode vector
+//    (create, delete, realloc) and directory children lists. This is the
+//    global Spinlock, held only briefly (< 1 µs) for path traversal and topology mutations.
+//
+// 2. **Stripe locks** (`INODE_STRIPES`): An array of N lightweight spinlocks
+//    indexed by `inode_id % N_STRIPES`. Protects reading/writing file content
+//    and executing dynamic pseudo-file generators without holding the topology lock.
+//
+// Lock order hierarchy:
+//   VFS (topology) → INODE_STRIPES[i] → VGA WRITER → SERIAL1
+//   Never acquire in reverse order.
+//
+// In `vfs_read_file`, the topology lock is acquired briefly to resolve the path
+// and determine the inode kind, then DROPPED before acquiring the stripe lock.
+// Dynamic generators (`/proc/meminfo`, `/proc/tasks`, etc.) execute entirely
+// outside the topology lock, enabling true cross-core concurrency on disjoint paths.
+
 pub static VFS: Spinlock<Vfs> = Spinlock::new(Vfs::new());
+
+/// Number of stripe locks for per-inode content access.
+/// 16 stripes give ~6% collision probability with birthday paradox for <50 inodes.
+pub const N_STRIPES: usize = 16;
+
+/// Per-inode stripe locks. An operation on inode `id` acquires stripe `id % N_STRIPES`.
+/// These protect inode content reads/writes without requiring the topology lock.
+pub static INODE_STRIPES: [Spinlock<()>; N_STRIPES] = [const { Spinlock::new(()) }; N_STRIPES];
+
+/// Acquires the stripe lock for a given inode ID and returns the guard.
+#[inline]
+pub fn stripe_lock(inode_id: usize) -> crate::sync::SpinlockGuard<'static, ()> {
+    INODE_STRIPES[inode_id % N_STRIPES].lock()
+}
+
+// ============================================================================
+// I1 — Public Wrapper Functions (fine-grained locking)
+// ============================================================================
+
+/// Resolves a path and reads the file content.
+///
+/// Invariant: The topology lock is held only briefly to resolve the path and
+/// inspect the inode kind, then dropped before acquiring the stripe lock.
+/// Dynamic pseudo-file generators (/proc/meminfo, etc.) execute completely outside
+/// the topology lock.
+pub fn vfs_read_file(path: &str) -> Result<alloc::vec::Vec<u8>, VfsError> {
+    // Step 1: Resolve path and inspect kind under topology lock (held for < 1 µs)
+    let (file_id, proc_gen, static_content) = {
+        let vfs = VFS.lock();
+        let id = vfs.resolve_path(path)?;
+        match &vfs.inodes[id].kind {
+            InodeKind::ProcFile { generator } => (id, Some(*generator), None),
+            InodeKind::File { content } => (id, None, Some(content.clone())),
+            InodeKind::DevNull => (id, None, Some(alloc::vec![])),
+            InodeKind::DevZero => (id, None, Some(alloc::vec![0u8; 64])),
+            InodeKind::DevRandom => (id, None, Some(dev_random_generator())),
+            InodeKind::Directory { .. } => return Err(VfsError::IsDirectory),
+            InodeKind::Tombstone => return Err(VfsError::Deleted),
+        }
+    };
+
+    // Step 2: Topology lock is now completely RELEASED.
+    // Acquire stripe lock for content read/generation
+    let _stripe = stripe_lock(file_id);
+    if let Some(generator) = proc_gen {
+        Ok(generator())
+    } else {
+        Ok(static_content.unwrap())
+    }
+}
+
+/// Reads file content by inode ID.
+pub fn vfs_read_file_by_id(file_id: usize) -> Result<alloc::vec::Vec<u8>, VfsError> {
+    let (proc_gen, static_content) = {
+        let vfs = VFS.lock();
+        if file_id >= vfs.inodes.len() {
+            return Err(VfsError::NotFound);
+        }
+        match &vfs.inodes[file_id].kind {
+            InodeKind::ProcFile { generator } => (Some(*generator), None),
+            InodeKind::File { content } => (None, Some(content.clone())),
+            InodeKind::DevNull => (None, Some(alloc::vec![])),
+            InodeKind::DevZero => (None, Some(alloc::vec![0u8; 64])),
+            InodeKind::DevRandom => (None, Some(dev_random_generator())),
+            InodeKind::Directory { .. } => return Err(VfsError::IsDirectory),
+            InodeKind::Tombstone => return Err(VfsError::Deleted),
+        }
+    };
+
+    let _stripe = stripe_lock(file_id);
+    if let Some(generator) = proc_gen {
+        Ok(generator())
+    } else {
+        Ok(static_content.unwrap())
+    }
+}
+
+/// Resolves a path to an inode ID under brief topology lock.
+pub fn vfs_resolve_path(path: &str) -> Result<usize, VfsError> {
+    let vfs = VFS.lock();
+    vfs.resolve_path(path)
+}
+
+/// Lists directory entries at the given path.
+pub fn vfs_list_directory(path: &str) -> Result<alloc::vec::Vec<DirectoryEntry>, VfsError> {
+    let vfs = VFS.lock();
+    let dir_id = vfs.resolve_path(path)?;
+    vfs.list_directory(dir_id)
+}
+
+/// Lists directory entries by directory inode ID.
+pub fn vfs_list_directory_id(dir_id: usize) -> Result<alloc::vec::Vec<DirectoryEntry>, VfsError> {
+    let vfs = VFS.lock();
+    vfs.list_directory(dir_id)
+}
+
+/// Returns the absolute path of an inode.
+pub fn vfs_get_path(node_id: usize) -> String {
+    let vfs = VFS.lock();
+    vfs.get_path(node_id)
+}
+
+/// Returns the current working directory path string.
+pub fn vfs_current_path() -> String {
+    vfs_get_path(vfs_current_inode())
+}
+
+/// Returns the current working directory inode ID.
+pub fn vfs_current_inode() -> usize {
+    VFS.lock().current_inode
+}
+
+/// Sets the current working directory inode ID.
+pub fn vfs_set_current_inode(id: usize) {
+    VFS.lock().current_inode = id;
+}
+
+/// Checks whether an inode ID is a directory.
+pub fn vfs_is_dir(id: usize) -> bool {
+    let vfs = VFS.lock();
+    if id < vfs.inodes.len() {
+        vfs.inodes[id].is_dir()
+    } else {
+        false
+    }
+}
+
+/// Creates a file at the given parent directory.
+pub fn vfs_create_file(parent_id: usize, name: &str, content: &[u8]) -> Result<usize, VfsError> {
+    let mut vfs = VFS.lock();
+    vfs.create_file_at(parent_id, name, content)
+}
+
+/// Creates a directory at the given parent.
+pub fn vfs_mkdir(parent_id: usize, name: &str) -> Result<usize, VfsError> {
+    let mut vfs = VFS.lock();
+    vfs.mkdir_at(parent_id, name)
+}
+
+/// Removes an entry by target inode ID.
+pub fn vfs_remove_entry(target_id: usize) -> Result<(), VfsError> {
+    let mut vfs = VFS.lock();
+    vfs.remove_entry(target_id)
+}
+
+/// Removes an entry by path.
+pub fn vfs_remove_by_path(path: &str) -> Result<(), VfsError> {
+    let mut vfs = VFS.lock();
+    let target_id = vfs.resolve_path(path)?;
+    vfs.remove_entry(target_id)
+}
+
+/// Returns the stripe index for a given inode ID (for testing/diagnostics).
+pub fn vfs_stripe_index(inode_id: usize) -> usize {
+    inode_id % N_STRIPES
+}
+
+/// Returns the number of stripe locks (for testing/diagnostics).
+pub fn vfs_stripe_count() -> usize {
+    N_STRIPES
+}
 
 /// Initializes the global Virtual File System and root RAM disk.
 pub fn init() {

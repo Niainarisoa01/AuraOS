@@ -211,8 +211,7 @@ fn render_files_content(canvas: &mut Canvas, x: usize, y: usize, w: usize, h: us
     let mut folder_x = grid_x;
     let mut folder_y = y + 48;
 
-    let vfs = crate::fs::VFS.lock();
-    if let Ok(entries) = vfs.list_directory(0) {
+    if let Ok(entries) = crate::fs::vfs_list_directory_id(0) {
         for entry in entries.iter().take(6) {
             // Folder icon box
             canvas.fill_rounded_rect(folder_x, folder_y, 44, 32, 4, Color::FOLDER_BLUE);
@@ -330,12 +329,15 @@ pub fn run_interactive_desktop() {
         }
 
         // Check for serial quit command ('q' or ESC = 0x1B)
-        if let Some(b) = crate::drivers::serial::SERIAL1.lock().receive_byte() {
+        // I1: Uses lockfree receive — no global SERIAL1 lock needed for reading.
+        if let Some(b) = crate::drivers::serial::receive_byte_lockfree() {
             if b == 0x1B || b == b'q' || b == b'Q' {
                 GUI_EXIT_REQUESTED.store(true, Ordering::Release);
                 break;
             }
         }
+        // Flush serial buffer to UART so background logs are drained during GUI session
+        crate::drivers::serial::serial_flush_all();
 
         // ---- Read mouse state ----
         let ms = mouse::get_state();

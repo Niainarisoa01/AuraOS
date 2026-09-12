@@ -193,21 +193,32 @@ extern "C" fn syscall_dispatch(
         }
         SYS_WRITE => {
             // write(fd, buf_ptr, len) — fd=1 (stdout), fd=2 (stderr)
-            // Lock order: WRITER first, then SERIAL1 (matches vga::_print to prevent deadlocks)
+            // I1: Serial output goes through per-CPU buffer (no global SERIAL1 lock).
+            //     VGA WRITER lock is still needed (single framebuffer device).
             if arg1 == 1 || arg1 == 2 {
                 let ptr = arg2 as *const u8;
                 let len = arg3 as usize;
                 if !ptr.is_null() && len <= 4096 {
+                    // Build a temporary buffer for the serial per-CPU write
                     let mut vga = crate::drivers::vga::WRITER.lock();
-                    let mut serial = crate::drivers::serial::SERIAL1.lock();
                     for i in 0..len {
                         let byte = unsafe { core::ptr::read_volatile(ptr.add(i)) };
                         if byte == 0 { break; }
-                        if byte == b'\n' {
-                            serial.send_byte(b'\r');
-                        }
-                        serial.send_byte(byte);
                         vga.write_byte(byte);
+                    }
+                    drop(vga);
+                    // Serial output through per-CPU buffer
+                    for i in 0..len {
+                        let byte = unsafe { core::ptr::read_volatile(ptr.add(i)) };
+                        if byte == 0 { break; }
+                        // Use serial_print which writes to per-CPU buffer
+                        if byte == b'\n' {
+                            crate::serial_print!("\n");
+                        } else if byte >= 0x20 && byte <= 0x7E {
+                            crate::serial_print!("{}", byte as char);
+                        } else {
+                            crate::serial_print!("{}", byte as char);
+                        }
                     }
                 }
                 len as u64

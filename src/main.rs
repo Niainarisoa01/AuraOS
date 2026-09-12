@@ -177,6 +177,9 @@ pub extern "C" fn _start(boot_info: &'static bootloader::bootinfo::BootInfo) -> 
 
     // Step 10d: Release all Application Processors to begin timer preemption and scheduling
     arch::smp::start_aps();
+    // I1: Enable per-CPU serial ring buffers now that SMP is initialized.
+    // Before this point, serial output goes directly through SERIAL1 lock.
+    drivers::serial::enable_percpu_buffering();
     println!("[OK] SMP       : Multi-core scheduling active across all online CPUs.");
 
     // Step 11: Execute Kernel Automated Subsystem Diagnostics
@@ -194,6 +197,7 @@ pub extern "C" fn _start(boot_info: &'static bootloader::bootinfo::BootInfo) -> 
             println!("  [FAIL] {} ({})", res.name, res.detail);
             klog!(Warn, "tests", "FAIL: {} -- {}", res.name, res.detail);
         }
+        drivers::serial::serial_flush_all();
     }
     if all_passed {
         println!("[OK] All {} subsystem tests PASSED. System verified 100%.", test_results.len());
@@ -201,6 +205,7 @@ pub extern "C" fn _start(boot_info: &'static bootloader::bootinfo::BootInfo) -> 
     } else {
         println!("[WARN] One or more diagnostic checks reported issues.");
     }
+    drivers::serial::serial_flush_all();
 
     // Step 12: System status report
     println!();
@@ -240,11 +245,14 @@ pub extern "C" fn _start(boot_info: &'static bootloader::bootinfo::BootInfo) -> 
     klog!(Info, "shell", "Interactive console ready.");
 
     // Interactive kernel execution loop:
-    // Processes pending keyboard inputs and enters low-power sleep (HLT)
-    // until the next hardware interrupt (timer tick or keypress).
+    // Processes pending keyboard inputs, flushes per-CPU serial buffers,
+    // and enters low-power sleep (HLT) until the next hardware interrupt.
     loop {
         drivers::keyboard::process_pending_keys();
         net::poll();
+        // I1: Drain all per-CPU serial ring buffers to the physical UART.
+        // This is the single point where SERIAL1 lock is taken for output.
+        drivers::serial::serial_flush_all();
         unsafe { core::arch::asm!("sti; hlt", options(nomem, nostack)); }
     }
 }

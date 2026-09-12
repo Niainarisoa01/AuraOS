@@ -100,17 +100,16 @@ pub fn handle_interrupt() {
 /// Drains and processes all enqueued keystrokes in regular thread context with interrupts enabled.
 pub fn process_pending_keys() {
     // 1. Process pending input from COM1 serial port
+    //    I1: Uses lockfree receive — the UART receive buffer is independent
+    //    of the transmit buffer, so no exclusion with writers is needed.
     let mut serial_buf = [0u8; 16];
     let mut serial_len = 0;
-    {
-        let serial = crate::drivers::serial::SERIAL1.lock();
-        while serial_len < serial_buf.len() {
-            if let Some(b) = serial.receive_byte() {
-                serial_buf[serial_len] = b;
-                serial_len += 1;
-            } else {
-                break;
-            }
+    while serial_len < serial_buf.len() {
+        if let Some(b) = crate::drivers::serial::receive_byte_lockfree() {
+            serial_buf[serial_len] = b;
+            serial_len += 1;
+        } else {
+            break;
         }
     }
     for &b in &serial_buf[..serial_len] {

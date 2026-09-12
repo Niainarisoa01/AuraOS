@@ -256,6 +256,10 @@ extern "x86-interrupt" fn lapic_timer_handler(_frame: InterruptStackFrame) {
     super::apic::send_eoi();
     // 2. Drive per-CPU scheduling and preemption
     crate::task::smp_timer_tick();
+    // 3. I1: BSP drains per-CPU serial ring buffers periodically to physical UART
+    if crate::arch::smp::current_cpu() == 0 {
+        crate::drivers::serial::serial_flush_all();
+    }
 }
 
 /// IRQ 1: PS/2 Keyboard Keystroke.
