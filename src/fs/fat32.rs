@@ -19,6 +19,7 @@ use alloc::vec::Vec;
 use alloc::format;
 use crate::sync::Spinlock;
 use crate::drivers::ata::{read_sector_drive, write_sector_drive, SECTOR_SIZE};
+use crate::fs::errors::Fat32Error;
 
 #[allow(dead_code)]
 pub const ATTR_READ_ONLY: u8 = 0x01;
@@ -112,9 +113,9 @@ impl Fat32Fs {
         lba_start: u32,
         total_sectors: u32,
         volume_label: &str,
-    ) -> Result<Self, &'static str> {
+    ) -> Result<Self, Fat32Error> {
         if total_sectors < 1024 {
-            return Err("Volume too small for FAT32");
+            return Err(Fat32Error::from("Volume too small for FAT32"));
         }
 
         let bytes_per_sector = 512u16;
@@ -133,7 +134,7 @@ impl Fat32Fs {
 
         let data_start_lba = lba_start + (reserved_sectors as u32) + (num_fats as u32) * sectors_per_fat;
         if data_start_lba >= lba_start + total_sectors {
-            return Err("Reserved & FAT sectors exceed volume size");
+            return Err(Fat32Error::from("Reserved & FAT sectors exceed volume size"));
         }
 
         let data_sectors = (lba_start + total_sectors) - data_start_lba;
@@ -248,28 +249,28 @@ impl Fat32Fs {
     }
 
     /// Mounts an existing FAT32 filesystem from the given LBA start sector.
-    pub fn mount(drive: u8, lba_start: u32) -> Result<Self, &'static str> {
+    pub fn mount(drive: u8, lba_start: u32) -> Result<Self, Fat32Error> {
         let mut bpb_sec = [0u8; SECTOR_SIZE];
         read_sector_drive(drive, lba_start, &mut bpb_sec)?;
 
         // Check boot signature 0x55, 0xAA
         if bpb_sec[510] != 0x55 || bpb_sec[511] != 0xAA {
-            return Err("Invalid boot sector signature (missing 0x55, 0xAA)");
+            return Err(Fat32Error::from("Invalid boot sector signature (missing 0x55, 0xAA)"));
         }
 
         // Check FAT32 type string at byte 82
         if &bpb_sec[82..87] != b"FAT32" {
-            return Err("Not a valid FAT32 filesystem (missing FAT32 signature)");
+            return Err(Fat32Error::from("Not a valid FAT32 filesystem (missing FAT32 signature)"));
         }
 
         let bytes_per_sector = u16::from_le_bytes([bpb_sec[11], bpb_sec[12]]);
         if bytes_per_sector != 512 {
-            return Err("Unsupported sector size (only 512 bytes supported)");
+            return Err(Fat32Error::from("Unsupported sector size (only 512 bytes supported)"));
         }
 
         let sectors_per_cluster = bpb_sec[13];
         if sectors_per_cluster == 0 {
-            return Err("Invalid sectors per cluster (0)");
+            return Err(Fat32Error::from("Invalid sectors per cluster (0)"));
         }
 
         let reserved_sectors = u16::from_le_bytes([bpb_sec[14], bpb_sec[15]]);
@@ -319,7 +320,7 @@ impl Fat32Fs {
     }
 
     /// Reads the next cluster pointer in the FAT table for the given cluster.
-    pub fn read_fat_entry(&self, cluster: u32) -> Result<u32, &'static str> {
+    pub fn read_fat_entry(&self, cluster: u32) -> Result<u32, Fat32Error> {
         let fat_offset = cluster * 4;
         let fat_sector = self.fat_start_lba + (fat_offset / (SECTOR_SIZE as u32));
         let offset_in_sec = (fat_offset % (SECTOR_SIZE as u32)) as usize;
@@ -338,7 +339,7 @@ impl Fat32Fs {
     }
 
     /// Writes a cluster pointer into both FAT 1 and FAT 2 (mirroring).
-    pub fn write_fat_entry(&self, cluster: u32, value: u32) -> Result<(), &'static str> {
+    pub fn write_fat_entry(&self, cluster: u32, value: u32) -> Result<(), Fat32Error> {
         let fat_offset = cluster * 4;
         let sector_offset = fat_offset / (SECTOR_SIZE as u32);
         let byte_offset = (fat_offset % (SECTOR_SIZE as u32)) as usize;
@@ -362,7 +363,7 @@ impl Fat32Fs {
     }
 
     /// Allocates a free cluster from the FAT, zero-initializes its sectors, and links it.
-    pub fn allocate_cluster(&mut self, prev_cluster: Option<u32>) -> Result<u32, &'static str> {
+    pub fn allocate_cluster(&mut self, prev_cluster: Option<u32>) -> Result<u32, Fat32Error> {
         for c in 3..self.total_clusters {
             if self.read_fat_entry(c)? == FAT_FREE {
                 self.write_fat_entry(c, FAT_EOC)?;
@@ -380,11 +381,11 @@ impl Fat32Fs {
                 return Ok(c);
             }
         }
-        Err("FAT32: No free clusters available (disk full)")
+        Err(Fat32Error::from("FAT32: No free clusters available (disk full)"))
     }
 
     /// Traverses and frees an entire chain of clusters in the FAT.
-    pub fn free_cluster_chain(&mut self, mut cluster: u32) -> Result<(), &'static str> {
+    pub fn free_cluster_chain(&mut self, mut cluster: u32) -> Result<(), Fat32Error> {
         while cluster >= 2 && cluster < 0x0FFF_FFF7 {
             let next = self.read_fat_entry(cluster)?;
             self.write_fat_entry(cluster, FAT_FREE)?;
@@ -394,7 +395,7 @@ impl Fat32Fs {
     }
 
     /// Reads all directory entries contained in the cluster chain of a directory.
-    pub fn list_directory_cluster(&self, mut cluster: u32) -> Result<Vec<FatDirEntry>, &'static str> {
+    pub fn list_directory_cluster(&self, mut cluster: u32) -> Result<Vec<FatDirEntry>, Fat32Error> {
         let mut entries = Vec::new();
 
         while cluster >= 2 && cluster < 0x0FFF_FFF7 {
@@ -462,7 +463,7 @@ impl Fat32Fs {
         &self,
         mut cluster: u32,
         name: &str,
-    ) -> Result<Option<(FatDirEntry, u32, usize)>, &'static str> {
+    ) -> Result<Option<(FatDirEntry, u32, usize)>, Fat32Error> {
         let name_upper = name.to_ascii_uppercase();
 
         while cluster >= 2 && cluster < 0x0FFF_FFF7 {
@@ -532,7 +533,7 @@ impl Fat32Fs {
     }
 
     /// Resolves a path (e.g. `/`, `/DIR`, `/DIR/FILE.TXT`) and returns the target entry and parent cluster.
-    pub fn resolve_path(&self, path: &str) -> Result<(Option<FatDirEntry>, u32), &'static str> {
+    pub fn resolve_path(&self, path: &str) -> Result<(Option<FatDirEntry>, u32), Fat32Error> {
         let trimmed = path.trim_matches('/');
         if trimmed.is_empty() {
             let root_entry = FatDirEntry {
@@ -558,7 +559,7 @@ impl Fat32Fs {
                         return Ok((Some(entry), curr_cluster));
                     }
                     if !entry.is_directory {
-                        return Err("Component in path is not a directory");
+                        return Err(Fat32Error::from("Component in path is not a directory"));
                     }
                     curr_cluster = entry.first_cluster;
                 }
@@ -566,22 +567,22 @@ impl Fat32Fs {
                     if is_last {
                         return Ok((None, curr_cluster));
                     } else {
-                        return Err("Directory in path not found");
+                        return Err(Fat32Error::from("Directory in path not found"));
                     }
                 }
             }
         }
 
-        Err("Failed to resolve path")
+        Err(Fat32Error::from("Failed to resolve path"))
     }
 
     /// Reads the entire content of a file given its path.
-    pub fn read_file(&self, path: &str) -> Result<Vec<u8>, &'static str> {
+    pub fn read_file(&self, path: &str) -> Result<Vec<u8>, Fat32Error> {
         let (entry_opt, _) = self.resolve_path(path)?;
         let entry = entry_opt.ok_or("File not found")?;
 
         if entry.is_directory {
-            return Err("Cannot read directory as file");
+            return Err(Fat32Error::from("Cannot read directory as file"));
         }
 
         let mut data = Vec::with_capacity(entry.file_size as usize);
@@ -630,7 +631,7 @@ impl Fat32Fs {
     }
 
     /// Writes data to a file, creating it if it doesn't exist or overwriting it if it does.
-    pub fn write_file(&mut self, path: &str, data: &[u8]) -> Result<(), &'static str> {
+    pub fn write_file(&mut self, path: &str, data: &[u8]) -> Result<(), Fat32Error> {
         let trimmed = path.trim_matches('/');
         let (parent_dir, filename) = match trimmed.rfind('/') {
             Some(pos) => (&trimmed[..pos], &trimmed[pos + 1..]),
@@ -638,14 +639,14 @@ impl Fat32Fs {
         };
 
         if filename.is_empty() {
-            return Err("Invalid empty filename");
+            return Err(Fat32Error::from("Invalid empty filename"));
         }
 
         let (parent_entry_opt, _) = self.resolve_path(parent_dir)?;
         let parent_cluster = match parent_entry_opt {
             Some(e) if e.is_directory => e.first_cluster,
-            Some(_) => return Err("Parent path is not a directory"),
-            None => return Err("Parent directory not found"),
+            Some(_) => return Err(Fat32Error::from("Parent path is not a directory")),
+            None => return Err(Fat32Error::from("Parent directory not found")),
         };
 
         let existing = self.find_entry_in_dir(parent_cluster, filename)?;
@@ -715,7 +716,7 @@ impl Fat32Fs {
     }
 
     /// Creates a new subdirectory in the filesystem.
-    pub fn create_dir(&mut self, path: &str) -> Result<u32, &'static str> {
+    pub fn create_dir(&mut self, path: &str) -> Result<u32, Fat32Error> {
         let trimmed = path.trim_matches('/');
         let (parent_dir, dirname) = match trimmed.rfind('/') {
             Some(pos) => (&trimmed[..pos], &trimmed[pos + 1..]),
@@ -723,18 +724,18 @@ impl Fat32Fs {
         };
 
         if dirname.is_empty() {
-            return Err("Invalid empty directory name");
+            return Err(Fat32Error::from("Invalid empty directory name"));
         }
 
         let (parent_entry_opt, _) = self.resolve_path(parent_dir)?;
         let parent_cluster = match parent_entry_opt {
             Some(e) if e.is_directory => e.first_cluster,
-            Some(_) => return Err("Parent path is not a directory"),
-            None => return Err("Parent directory not found"),
+            Some(_) => return Err(Fat32Error::from("Parent path is not a directory")),
+            None => return Err(Fat32Error::from("Parent directory not found")),
         };
 
         if self.find_entry_in_dir(parent_cluster, dirname)?.is_some() {
-            return Err("Directory already exists");
+            return Err(Fat32Error::from("Directory already exists"));
         }
 
         let new_cluster = self.allocate_cluster(None)?;
@@ -776,7 +777,7 @@ impl Fat32Fs {
         attr: u8,
         first_cluster: u32,
         file_size: u32,
-    ) -> Result<(), &'static str> {
+    ) -> Result<(), Fat32Error> {
         let ch_high = ((first_cluster >> 16) & 0xFFFF) as u16;
         let ch_low = (first_cluster & 0xFFFF) as u16;
 
@@ -819,11 +820,11 @@ impl Fat32Fs {
             cluster = next;
         }
 
-        Err("FAT32: Directory slot allocation failure")
+        Err(Fat32Error::from("FAT32: Directory slot allocation failure"))
     }
 
     /// Deletes a file or directory entry and frees its associated cluster chain.
-    pub fn delete_entry(&mut self, path: &str) -> Result<(), &'static str> {
+    pub fn delete_entry(&mut self, path: &str) -> Result<(), Fat32Error> {
         let trimmed = path.trim_matches('/');
         let (parent_dir, filename) = match trimmed.rfind('/') {
             Some(pos) => (&trimmed[..pos], &trimmed[pos + 1..]),
@@ -833,8 +834,8 @@ impl Fat32Fs {
         let (parent_entry_opt, _) = self.resolve_path(parent_dir)?;
         let parent_cluster = match parent_entry_opt {
             Some(e) if e.is_directory => e.first_cluster,
-            Some(_) => return Err("Parent path is not a directory"),
-            None => return Err("Parent directory not found"),
+            Some(_) => return Err(Fat32Error::from("Parent path is not a directory")),
+            None => return Err(Fat32Error::from("Parent directory not found")),
         };
 
         let entry_info = self.find_entry_in_dir(parent_cluster, filename)?;

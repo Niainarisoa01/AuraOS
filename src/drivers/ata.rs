@@ -8,6 +8,7 @@
 //! Standard Sector Size: 512 bytes.
 
 use crate::arch::io::{inb, inw, io_wait, outb, outw};
+use crate::fs::errors::AtaError;
 
 const ATA_DATA_PORT: u16 = 0x1F0;
 const ATA_SECTOR_COUNT: u16 = 0x1F2;
@@ -31,43 +32,43 @@ const ATA_STATUS_ERR: u8 = 0x01; // Error
 pub const SECTOR_SIZE: usize = 512;
 
 /// Waits for the drive to clear the BSY flag and assert the DRQ flag.
-fn wait_drive_ready() -> Result<(), &'static str> {
+fn wait_drive_ready() -> Result<(), AtaError> {
     for _ in 0..100_000 {
         let status = unsafe { inb(ATA_COMMAND_STATUS) };
         if status == 0xFF {
-            return Err("No ATA drive connected (floating bus 0xFF)");
+            return Err(AtaError::NoDrive);
         }
         if (status & ATA_STATUS_ERR) != 0 {
-            return Err("ATA hardware error status flag set");
+            return Err(AtaError::DriveError);
         }
         if (status & ATA_STATUS_BSY) == 0 && (status & ATA_STATUS_DRQ) != 0 {
             return Ok(());
         }
         unsafe { io_wait() };
     }
-    Err("ATA drive timeout waiting for DRQ")
+    Err(AtaError::DriveNotReady)
 }
 
 /// Waits until the drive is no longer busy.
-fn wait_drive_not_busy() -> Result<(), &'static str> {
+fn wait_drive_not_busy() -> Result<(), AtaError> {
     for _ in 0..100_000 {
         let status = unsafe { inb(ATA_COMMAND_STATUS) };
         if status == 0xFF {
-            return Err("No ATA drive connected (floating bus 0xFF)");
+            return Err(AtaError::NoDrive);
         }
         if (status & ATA_STATUS_BSY) == 0 {
             return Ok(());
         }
         unsafe { io_wait() };
     }
-    Err("ATA drive timeout waiting for BSY to clear")
+    Err(AtaError::DriveBusy)
 }
 
 /// Reads a single 512-byte sector from the specified ATA drive (0 = Master, 1 = Slave) using 28-bit LBA.
 #[allow(dead_code)]
-pub fn read_sector_drive(drive: u8, lba: u32, buffer: &mut [u8; SECTOR_SIZE]) -> Result<(), &'static str> {
+pub fn read_sector_drive(drive: u8, lba: u32, buffer: &mut [u8; SECTOR_SIZE]) -> Result<(), AtaError> {
     if lba > 0x0FFF_FFFF {
-        return Err("LBA exceeds 28-bit addressing limit");
+        return Err(AtaError::InvalidLba);
     }
 
     let drive_head = if drive == 0 { 0xE0 } else { 0xF0 } | (((lba >> 24) & 0x0F) as u8);
@@ -104,15 +105,15 @@ pub fn read_sector_drive(drive: u8, lba: u32, buffer: &mut [u8; SECTOR_SIZE]) ->
 
 /// Reads a single 512-byte sector from the primary master hard drive (drive 0) using 28-bit LBA.
 #[allow(dead_code)]
-pub fn read_sector(lba: u32, buffer: &mut [u8; SECTOR_SIZE]) -> Result<(), &'static str> {
+pub fn read_sector(lba: u32, buffer: &mut [u8; SECTOR_SIZE]) -> Result<(), AtaError> {
     read_sector_drive(0, lba, buffer)
 }
 
 /// Writes a single 512-byte sector to the specified ATA drive (0 = Master, 1 = Slave) using 28-bit LBA.
 #[allow(dead_code)]
-pub fn write_sector_drive(drive: u8, lba: u32, buffer: &[u8; SECTOR_SIZE]) -> Result<(), &'static str> {
+pub fn write_sector_drive(drive: u8, lba: u32, buffer: &[u8; SECTOR_SIZE]) -> Result<(), AtaError> {
     if lba > 0x0FFF_FFFF {
-        return Err("LBA exceeds 28-bit addressing limit");
+        return Err(AtaError::InvalidLba);
     }
 
     let drive_head = if drive == 0 { 0xE0 } else { 0xF0 } | (((lba >> 24) & 0x0F) as u8);
@@ -152,6 +153,6 @@ pub fn write_sector_drive(drive: u8, lba: u32, buffer: &[u8; SECTOR_SIZE]) -> Re
 
 /// Writes a single 512-byte sector to the primary master hard drive (drive 0) using 28-bit LBA.
 #[allow(dead_code)]
-pub fn write_sector(lba: u32, buffer: &[u8; SECTOR_SIZE]) -> Result<(), &'static str> {
+pub fn write_sector(lba: u32, buffer: &[u8; SECTOR_SIZE]) -> Result<(), AtaError> {
     write_sector_drive(0, lba, buffer)
 }

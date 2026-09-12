@@ -8,6 +8,9 @@ use bootloader as _;
 // Core concurrency primitive
 mod sync;
 
+// Structured kernel logging
+mod klog;
+
 // Subsystem architecture layers
 mod arch;
 mod drivers;
@@ -25,14 +28,20 @@ use alloc::vec::Vec;
 use core::panic::PanicInfo;
 
 /// Entry point of the AuraOS kernel.
-/// Called by the bootloader in 64-bit Long Mode.
+/// Called by the bootloader in 64-bit Long Mode, which passes the boot
+/// information (including the E820 memory map) in RDI.
 #[unsafe(no_mangle)]
-pub extern "C" fn _start() -> ! {
+pub extern "C" fn _start(boot_info: &'static bootloader::bootinfo::BootInfo) -> ! {
     // Step 0: Initialize COM1 serial port for immediate debug logging
     drivers::serial::init();
     serial_println!("============================================================");
     serial_println!("        AuraOS Kernel v0.1.0 - Booting Up...                ");
     serial_println!("============================================================");
+
+    // Step 0b: Initialize the Physical Memory Manager from the E820 memory map.
+    // This must happen as early as possible so the bootloader-provided BootInfo
+    // is captured into kernel-owned storage before anything could clobber it.
+    memory::pmm::init(boot_info);
 
     // ==========================================
     // AuraOS Kernel Boot Phase
@@ -47,11 +56,11 @@ pub extern "C" fn _start() -> ! {
 
     // Step 2: Initialize and remap the dual 8259 PIC controllers
     arch::pic::init();
-    serial_println!("[OK] PIC remapped.");
+    klog!(Info, "pic", "PIC remapped.");
 
     // Step 3: Initialize the Interrupt Descriptor Table (IDT)
     arch::idt::init();
-    serial_println!("[OK] IDT loaded.");
+    klog!(Info, "idt", "IDT loaded.");
 
     // Step 3a: Initialize PIT 8254 Timer at 100 Hz (preemptive scheduling)
     drivers::pit::init();
@@ -59,14 +68,14 @@ pub extern "C" fn _start() -> ! {
     // Step 3b: Initialize PS/2 Mouse auxiliary controller
     drivers::mouse::init();
     println!("[OK] Mouse     : PS/2 Mouse initialized (IRQ 12 active).");
-    serial_println!("[OK] PS/2 Mouse initialized.");
+    klog!(Info, "mouse", "PS/2 Mouse initialized.");
 
     // Step 3c: Initialize x86_64 Native System Call Interface (syscall/sysret)
     arch::syscall::init();
 
     // Step 4: Initialize the 8 MiB Dynamic Heap Allocator
     memory::allocator::init_heap();
-    serial_println!("[OK] 8 MiB Heap initialized.");
+    klog!(Info, "allocator", "8 MiB heap initialized.");
 
     // Step 4b: Initialize User Space Memory Manager
     memory::user_space::init();
@@ -81,7 +90,7 @@ pub extern "C" fn _start() -> ! {
         let test_str = format!("AuraOS Dynamic String (Vec len = {})", test_vec.len());
         println!("[OK] Allocator : Box({}), Vec({:?}), String ready.", *heap_val, &test_vec[..3]);
         println!("                 {}", test_str);
-        serial_println!("[OK] Dynamic allocations verified: Box, Vec, String.");
+        klog!(Debug, "allocator", "Dynamic allocations verified: Box, Vec, String.");
     }
 
     // Step 6: CPU and Hardware Clock Detection
@@ -89,13 +98,13 @@ pub extern "C" fn _start() -> ! {
     let rtc = drivers::cmos::read_rtc();
     println!("[OK] Processor : {} ({})", cpu.brand_str(), cpu.vendor_str());
     println!("[OK] RTC Clock : {:04}-{:02}-{:02} {:02}:{:02}:{:02} UTC", rtc.year, rtc.month, rtc.day, rtc.hour, rtc.minute, rtc.second);
-    serial_println!("[OK] Processor: {} ({})", cpu.brand_str(), cpu.vendor_str());
-    serial_println!("[OK] RTC Clock: {:04}-{:02}-{:02} {:02}:{:02}:{:02} UTC", rtc.year, rtc.month, rtc.day, rtc.hour, rtc.minute, rtc.second);
+    klog!(Info, "cpu", "Processor: {} ({})", cpu.brand_str(), cpu.vendor_str());
+    klog!(Info, "rtc", "RTC Clock: {:04}-{:02}-{:02} {:02}:{:02}:{:02} UTC", rtc.year, rtc.month, rtc.day, rtc.hour, rtc.minute, rtc.second);
 
     // Step 7: PCI Hardware Bus Enumeration
     let pci_devices = drivers::pci::scan_pci_bus();
     println!("[OK] PCI Bus   : Discovered {} active hardware device(s).", pci_devices.len());
-    serial_println!("[OK] PCI Bus: {} active device(s) enumerated.", pci_devices.len());
+    klog!(Info, "pci", "{} active device(s) enumerated.", pci_devices.len());
     for dev in &pci_devices {
         serial_println!("      [{:02x}:{:02x}.{}] {:04x}:{:04x} | {} - {}",
             dev.bus, dev.slot, dev.func, dev.vendor_id, dev.device_id,
@@ -106,6 +115,23 @@ pub extern "C" fn _start() -> ! {
     memory::paging::init_hardware_mappings();
     arch::acpi::init();
     arch::apic::init();
+
+    // Step 7c: Activate Bochs BGA high-resolution framebuffer if present.
+    // The desktop GUI stays available afterwards via the `gui` shell command,
+    // or launches automatically once the console is made interactive below.
+    let bga_active = {
+        if drivers::bga::is_available() {
+            drivers::bga::init_graphics_mode(drivers::bga::SCREEN_WIDTH, drivers::bga::SCREEN_HEIGHT)
+        } else {
+            false
+        }
+    };
+    if bga_active {
+        println!("[OK] Video     : BGA 1024x768x32bpp framebuffer active (TrueColor).");
+        klog!(Info, "video", "BGA 1024x768x32bpp activated at boot.");
+    } else {
+        println!("[--] Video     : BGA not available, staying in VGA text mode.");
+    }
     {
         let acpi = arch::acpi::ACPI_DATA.lock();
         if acpi.is_initialized {
@@ -119,17 +145,17 @@ pub extern "C" fn _start() -> ! {
     // Step 8: Initialize Kernel Multitasking & Scheduler
     task::init();
     println!("[OK] Tasks     : Round-Robin scheduler initialized (TCBs ready).");
-    serial_println!("[OK] Multitasking initialized.");
+    klog!(Info, "scheduler", "Multitasking initialized.");
 
     // Step 9: Initialize Virtual File System & RAMFS
     fs::init();
     println!("[OK] VFS       : Root RAM disk mounted at '/' (hierarchy ready).");
-    serial_println!("[OK] VFS & RAMFS mounted.");
+    klog!(Info, "vfs", "VFS & RAMFS mounted.");
 
     // Step 10: Enable hardware interrupts at the CPU level
     unsafe { core::arch::asm!("sti", options(nomem, nostack)) };
     println!("[OK] CPU       : Hardware interrupts enabled (sti).");
-    serial_println!("[OK] Interrupts enabled (sti).");
+    klog!(Info, "cpu", "Interrupts enabled (sti).");
 
     // Step 10b: Initialize Network Stack (Intel e1000 + Ethernet/ARP/IPv4/ICMP/UDP)
     let net_ok = net::init();
@@ -151,16 +177,16 @@ pub extern "C" fn _start() -> ! {
     for res in &test_results {
         if res.passed {
             println!("  [PASS] {}", res.name);
-            serial_println!("  [PASS] {} -- {}", res.name, res.detail);
+            klog!(Info, "tests", "PASS: {} -- {}", res.name, res.detail);
         } else {
             all_passed = false;
             println!("  [FAIL] {} ({})", res.name, res.detail);
-            serial_println!("  [FAIL] {} -- {}", res.name, res.detail);
+            klog!(Warn, "tests", "FAIL: {} -- {}", res.name, res.detail);
         }
     }
     if all_passed {
         println!("[OK] All {} subsystem tests PASSED. System verified 100%.", test_results.len());
-        serial_println!("[OK] All {} automated self-tests passed.", test_results.len());
+        klog!(Info, "tests", "All {} automated self-tests passed.", test_results.len());
     } else {
         println!("[WARN] One or more diagnostic checks reported issues.");
     }
@@ -169,20 +195,38 @@ pub extern "C" fn _start() -> ! {
     println!();
     println!("[OK] Mode      : x86_64 Bare-Metal Long Mode (64-bit)");
     println!("[OK] Memory    : 8 MiB Heap, 4 KiB Paging abstractions");
+    println!("[OK] RAM       : Physical RAM {} MiB detected (E820), {} MiB free frames via PMM",
+        memory::pmm::total_memory() / (1024 * 1024),
+        memory::pmm::free_memory() / (1024 * 1024));
     println!("[OK] Filesystem: Virtual Inode VFS mounted at '/'");
     println!("[OK] Storage   : ATA / IDE PIO 28-bit driver active");
     println!("[OK] Network   : Intel e1000 Gigabit Ethernet (ARP/IPv4/ICMP/UDP)");
     println!("[OK] Power/ACPI: S5 Soft-Off ready, Local APIC initialized");
     println!("[OK] Serial    : COM1 UART at 0x3F8 (115200 baud)");
-    println!("[OK] Video     : VGA 80x25 text mode with auto-scrolling");
     println!("[OK] Keyboard  : PS/2 driver active (direct typing)");
     println!();
+
+    // Step 12b: Launch the graphical desktop if BGA framebuffer is active.
+    // The GUI loop returns on ESC (or 'q' via serial) and falls through to
+    // the interactive text console below.
+    if bga_active {
+        println!("------------------------------------------------------------");
+        println!("  AuraOS v0.1.0 — Launching graphical desktop (ESC to return)");
+        println!("------------------------------------------------------------");
+        gui::run_interactive_desktop();
+        drivers::vga::clear_screen();
+        println!("============================================================");
+        println!("        AuraOS v0.1.0 — Graphical session ended.");
+        println!("============================================================");
+        println!();
+    }
+
     println!("------------------------------------------------------------");
     println!("  AuraOS v0.1.0 ready. Interactive console active:");
     println!("------------------------------------------------------------");
     print!("auraos> ");
 
-    serial_println!("AuraOS v0.1.0 interactive console ready.");
+    klog!(Info, "shell", "Interactive console ready.");
 
     // Interactive kernel execution loop:
     // Processes pending keyboard inputs and enters low-power sleep (HLT)

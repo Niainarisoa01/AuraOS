@@ -12,6 +12,9 @@ use crate::sync::Spinlock;
 
 use alloc::borrow::Cow;
 
+pub use errors::VfsError;
+
+pub mod errors;
 pub mod fat32;
 pub mod elf;
 
@@ -168,7 +171,7 @@ impl Vfs {
 
     /// Resolves a path string starting from either root (if path starts with '/')
     /// or from the current working directory.
-    pub fn resolve_path(&self, path: &str) -> Result<usize, &'static str> {
+    pub fn resolve_path(&self, path: &str) -> Result<usize, VfsError> {
         let trimmed = path.trim();
         if trimmed.is_empty() {
             return Ok(self.current_inode);
@@ -202,12 +205,12 @@ impl Vfs {
                     }
                     found
                 }
-                _ => return Err("Not a directory in path"),
+                _ => return Err(VfsError::NotADirectory),
             };
 
             match next {
                 Some(id) => curr = id,
-                None => return Err("File or directory not found"),
+                None => return Err(VfsError::NotFound),
             }
         }
 
@@ -215,16 +218,16 @@ impl Vfs {
     }
 
     /// Creates a new directory inside the specified parent directory Inode.
-    pub fn mkdir_at(&mut self, parent_id: usize, name: &str) -> Result<usize, &'static str> {
+    pub fn mkdir_at(&mut self, parent_id: usize, name: &str) -> Result<usize, VfsError> {
         if !self.inodes[parent_id].is_dir() {
-            return Err("Parent is not a directory");
+            return Err(VfsError::NotADirectory);
         }
 
         // Check for duplicates
         if let InodeKind::Directory { children } = &self.inodes[parent_id].kind {
             for &child_id in children {
                 if self.inodes[child_id].name == name {
-                    return Err("Entry already exists");
+                    return Err(VfsError::AlreadyExists);
                 }
             }
         }
@@ -243,9 +246,9 @@ impl Vfs {
     }
 
     /// Creates a new regular file with initial content inside the parent directory Inode.
-    pub fn create_file_at(&mut self, parent_id: usize, name: &str, content: &[u8]) -> Result<usize, &'static str> {
+    pub fn create_file_at(&mut self, parent_id: usize, name: &str, content: &[u8]) -> Result<usize, VfsError> {
         if !self.inodes[parent_id].is_dir() {
-            return Err("Parent is not a directory");
+            return Err(VfsError::NotADirectory);
         }
 
         // Check if file already exists; if so, overwrite its content
@@ -257,7 +260,7 @@ impl Vfs {
                         file_content.extend_from_slice(content);
                         return Ok(child_id);
                     } else {
-                        return Err("Target exists and is a directory");
+                        return Err(VfsError::IsDirectory);
                     }
                 }
             }
@@ -279,7 +282,7 @@ impl Vfs {
     }
 
     /// Lists entries in the specified directory Inode.
-    pub fn list_directory(&self, dir_id: usize) -> Result<Vec<DirectoryEntry>, &'static str> {
+    pub fn list_directory(&self, dir_id: usize) -> Result<Vec<DirectoryEntry>, VfsError> {
         match &self.inodes[dir_id].kind {
             InodeKind::Directory { children } => {
                 let mut list = Vec::new();
@@ -293,7 +296,7 @@ impl Vfs {
                 }
                 Ok(list)
             }
-            _ => Err("Not a directory"),
+            _ => Err(VfsError::NotADirectory),
         }
     }
 
@@ -303,9 +306,9 @@ impl Vfs {
         parent_id: usize,
         name: &str,
         generator: fn() -> Vec<u8>,
-    ) -> Result<usize, &'static str> {
+    ) -> Result<usize, VfsError> {
         if !self.inodes[parent_id].is_dir() {
-            return Err("Parent is not a directory");
+            return Err(VfsError::NotADirectory);
         }
         let new_id = self.allocate_inode(parent_id, name, InodeKind::ProcFile { generator });
 
@@ -322,9 +325,9 @@ impl Vfs {
         parent_id: usize,
         name: &str,
         kind: InodeKind,
-    ) -> Result<usize, &'static str> {
+    ) -> Result<usize, VfsError> {
         if !self.inodes[parent_id].is_dir() {
-            return Err("Parent is not a directory");
+            return Err(VfsError::NotADirectory);
         }
         let new_id = self.allocate_inode(parent_id, name, kind);
 
@@ -336,15 +339,15 @@ impl Vfs {
     }
 
     /// Reads content from the specified file Inode (static or dynamic pseudo-file).
-    pub fn read_file(&self, file_id: usize) -> Result<Cow<'_, [u8]>, &'static str> {
+    pub fn read_file(&self, file_id: usize) -> Result<Cow<'_, [u8]>, VfsError> {
         match &self.inodes[file_id].kind {
             InodeKind::File { content } => Ok(Cow::Borrowed(content.as_slice())),
             InodeKind::ProcFile { generator } => Ok(Cow::Owned(generator())),
             InodeKind::DevNull => Ok(Cow::Borrowed(&[])),
             InodeKind::DevZero => Ok(Cow::Owned(alloc::vec![0u8; 64])),
             InodeKind::DevRandom => Ok(Cow::Owned(dev_random_generator())),
-            InodeKind::Directory { .. } => Err("Cannot read directory as file"),
-            InodeKind::Tombstone => Err("Cannot read deleted file"),
+            InodeKind::Directory { .. } => Err(VfsError::IsDirectory),
+            InodeKind::Tombstone => Err(VfsError::Deleted),
         }
     }
 
@@ -370,9 +373,9 @@ impl Vfs {
 
     /// Removes an entry from its parent directory and frees its resources.
     /// For directories, recursively cleans up all children.
-    pub fn remove_entry(&mut self, target_id: usize) -> Result<(), &'static str> {
+    pub fn remove_entry(&mut self, target_id: usize) -> Result<(), VfsError> {
         if target_id == 0 {
-            return Err("Cannot remove root directory");
+            return Err(VfsError::RootProtected);
         }
 
         // Recursively collect all descendant IDs to clean up
@@ -387,7 +390,7 @@ impl Vfs {
         {
             children.remove(pos);
         } else {
-            return Err("Entry not found in parent");
+            return Err(VfsError::NotFound);
         }
 
         // Free memory by marking removed inodes as tombstones and adding to free-list
@@ -439,13 +442,26 @@ fn proc_meminfo_generator() -> Vec<u8> {
     let total_kb = crate::memory::allocator::HEAP_SIZE / 1024;
     let free_kb = crate::memory::allocator::free_memory() / 1024;
     let used_kb = crate::memory::allocator::used_memory() / 1024;
+
+    // Physical memory stats from the PMM (real E820 values).
+    // Integer MiB: floor for total/free, ceiling for used so the three lines
+    // add up (245 = 244 free + 1 used) under the no_std f64-less formatting.
+    let phys_total_mb = crate::memory::pmm::total_memory() / (1024 * 1024);
+    let phys_free_mb = crate::memory::pmm::free_memory() / (1024 * 1024);
+    let phys_used_mb = crate::memory::pmm::used_memory().div_ceil(1024 * 1024);
+
     alloc::format!(
         "MemTotal:        {} kB\n\
          MemFree:         {} kB\n\
          MemUsed:         {} kB\n\
          HeapCapacity:    {} kB ({} MiB Coalescing Allocator)\n\
+         PhysicalTotal:   {} MiB (E820 memory map)\n\
+         PhysicalFree:    {} MiB\n\
+         PhysicalUsed:    {} MiB\n\
+         PMMRange:        2 MiB .. 512 MiB (identity-mapped frames)\n\
          PagingModel:     4-Level x86_64 Long Mode (PML4)\n",
-        total_kb, free_kb, used_kb, total_kb, total_kb / 1024
+        total_kb, free_kb, used_kb, total_kb, total_kb / 1024,
+        phys_total_mb, phys_free_mb, phys_used_mb,
     ).into_bytes()
 }
 

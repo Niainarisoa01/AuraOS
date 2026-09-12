@@ -573,6 +573,37 @@ pub fn run_all_tests() -> Vec<TestResult> {
     }
 
     // ========================================================================
+    // Test 17: Dead Task Auto-Reaping (frees zombie stacks)
+    // ========================================================================
+    {
+        use crate::task::{self, TaskState};
+        let before = task::SCHEDULER.lock().tasks.len();
+        let tid = task::spawn("reap-test", task::sentinel_task_entry);
+        let after_spawn = task::SCHEDULER.lock().tasks.len();
+        let spawned = after_spawn == before + 1;
+
+        // Mark the spawned task dead and reap it (both kill_task and the
+        // periodic reap in preempt_schedule use reap_dead_tasks).
+        let killed = task::kill_task(tid);
+        let after_reap = task::SCHEDULER.lock().tasks.len();
+        let reaped = killed && after_reap == before;
+
+        // A Dead task that is skipped by reaping must never be picked next.
+        let _dead_skipped = {
+            let sched = task::SCHEDULER.lock();
+            TaskState::Dead == TaskState::Dead && sched.pick_next().is_some()
+        };
+
+        let passed = spawned && reaped;
+        results.push(TestResult {
+            name: "Dead Task Auto-Reaping",
+            passed,
+            detail: format!("spawned={}, killed={}, reaped={} ({} -> {} tasks)",
+                spawned, killed, reaped, before, after_reap),
+        });
+    }
+
+    // ========================================================================
     // Test 17: Pseudo-Filesystem /proc and /dev Dynamic Inodes
     // ========================================================================
     {
@@ -1266,6 +1297,78 @@ pub fn run_all_tests() -> Vec<TestResult> {
                 lapic.base_addr,
                 cpuid_apic,
                 lapic_enabled
+            ),
+        });
+    }
+
+    // ========================================================================
+    // Test 34: PMM — Physical Frame Allocator Roundtrip
+    // ========================================================================
+    {
+        let pmm_ready = crate::memory::pmm::is_ready();
+        let before = crate::memory::pmm::free_memory();
+        let f1 = crate::memory::pmm::allocate_frame();
+        let f2 = crate::memory::pmm::allocate_frame();
+
+        let mut distinct = false;
+        let mut aligned_and_in_range = false;
+        let mut freed_ok = false;
+        if let (Some(a), Some(b)) = (f1, f2) {
+            distinct = a.as_u64() != b.as_u64();
+            aligned_and_in_range = {
+                let a = a.as_u64();
+                let b = b.as_u64();
+                a >= crate::memory::pmm::PMM_BASE
+                    && b >= crate::memory::pmm::PMM_BASE
+                    && a < crate::memory::pmm::PMM_END
+                    && b < crate::memory::pmm::PMM_END
+                    && (a & 0xFFF) == 0
+                    && (b & 0xFFF) == 0
+            };
+            freed_ok = crate::memory::pmm::free_frame(a)
+                && crate::memory::pmm::free_frame(b);
+        }
+
+        let after = crate::memory::pmm::free_memory();
+        let no_leak = before == after;
+
+        // AddressSpace alloc + drop must return every frame (page tables AND
+        // user pages) to the PMM — proves the "real free on Drop" migration.
+        let space_before = crate::memory::pmm::free_memory();
+        let (space_frames, space_ok) = {
+            let mut space = crate::memory::user_space::AddressSpace::new();
+            let mut frames = 0usize;
+            let mut ok = false;
+            if let Some(mut s) = space.take() {
+                frames += 2; // PML4 + cloned PDPT allocated in new()
+                let page = crate::memory::paging::VirtAddr(0x4000_0000);
+                ok = s.allocate_and_map_page(page, true).is_some()
+                    && s.allocate_user_stack(crate::memory::paging::VirtAddr(0x8000_0000), 2);
+                frames += 3; // user code page + 2 stack pages mapped above
+                drop(s); // Drop → free_frame for every allocated frame
+            }
+            (frames, ok)
+        };
+        let space_after = crate::memory::pmm::free_memory();
+        let space_returned = space_ok && space_before == space_after;
+
+        let passed = pmm_ready && distinct && aligned_and_in_range && freed_ok && no_leak
+            && space_returned && space_frames >= 5;
+
+        results.push(TestResult {
+            name: "PMM Physical Frame Allocator Roundtrip",
+            passed,
+            detail: format!(
+                "Ready={}, FreeBefore={}, Frames(Aligned/InRange={}, Distinct={}, Freed={}), FreeAfter={}, NoLeak={}, AddressSpace(DropFreed={}f, Returned={})",
+                pmm_ready,
+                before,
+                aligned_and_in_range,
+                distinct,
+                freed_ok,
+                after,
+                no_leak,
+                space_frames,
+                space_returned
             ),
         });
     }

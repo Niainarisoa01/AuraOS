@@ -73,6 +73,17 @@ use crate::arch::msr::{rdmsr, wrmsr};
 pub static USER_RSP_SCRATCH: AtomicU64 = AtomicU64::new(0);
 pub static KERNEL_RSP_SCRATCH: AtomicU64 = AtomicU64::new(0);
 
+/// Scratch slot for the syscall number (RAX on entry).
+///
+/// The `syscall_entry` naked assembly saves RAX here *before* calling the Rust
+/// dispatcher. Reading the number from the 7th stack argument instead is
+/// unreliable: the compiler's prologue moves RSP before the read, so a direct
+/// `[rsp + 8]` access lands in uninitialized local space (observed as bogus
+/// syscall numbers). FMASK clears IF on entry and the read happens before any
+/// preemption point, so a single global slot is safe on this UP kernel (a
+/// future SMP port should make it per-CPU).
+static SYSCALL_NR_SCRATCH: AtomicU64 = AtomicU64::new(0);
+
 /// Updates the kernel stack pointer used on syscall entry
 pub fn set_kernel_rsp(rsp: u64) {
     KERNEL_RSP_SCRATCH.store(rsp, Ordering::Release);
@@ -109,8 +120,11 @@ unsafe extern "C" fn syscall_entry() {
         "push r15",
 
         // 4. Push syscall number (RAX) onto kernel stack as 7th argument
-        //    This is read by syscall_dispatch before the compiler can clobber RAX.
+        //    (kept for stack balance below), and snapshot it into a scratch
+        //    static so the Rust dispatcher reads it reliably regardless of
+        //    the compiler's stack frame layout.
         "push rax",
+        "mov [rip + {nr}], rax",
 
         // 5. Call the Rust syscall dispatcher
         // RDI, RSI, RDX, R10, R8, R9 = args (R10 replaces RCX per syscall ABI)
@@ -134,15 +148,17 @@ unsafe extern "C" fn syscall_entry() {
 
         user_rsp = sym USER_RSP_SCRATCH,
         kernel_rsp = sym KERNEL_RSP_SCRATCH,
+        nr = sym SYSCALL_NR_SCRATCH,
         handler = sym syscall_dispatch,
     );
 }
 
 /// Rust-level syscall dispatcher.
-/// Called from the naked assembly entry point. The syscall number was pushed
-/// onto the kernel stack before the `call` and sits at [RSP + 0] on entry,
-/// but due to the C ABI call frame it's located at a known stack offset.
-/// We read it via a 7th stack-passed implicit argument.
+/// Called from the naked assembly entry point. User arguments arrive in the
+/// first six registers (RDI/RSI/RDX/RCX/R8/R9); the syscall number is read
+/// from `SYSCALL_NR_SCRATCH`, which the entry assembly snapshots from RAX
+/// before the call. Reading it from the stack (7th-arg convention) is not
+/// reliable here: the compiled prologue relocates RSP before the read.
 #[allow(unused_variables)]
 extern "C" fn syscall_dispatch(
     arg1: u64,  // RDI
@@ -152,24 +168,15 @@ extern "C" fn syscall_dispatch(
     arg5: u64,  // R8
     arg6: u64,  // R9
 ) -> u64 {
-    // The syscall number was pushed onto the stack before the `call` instruction.
-    // In the C calling convention, the return address is at [RSP], so the pushed
-    // syscall number is at [RSP + 8] (i.e., just above the return address).
-    let syscall_nr: u64;
-    unsafe {
-        core::arch::asm!(
-            "mov {}, [rsp + 8]",
-            out(reg) syscall_nr,
-            options(nomem, nostack)
-        );
-    }
+    // Syscall number captured from RAX by the naked entry before calling us.
+    let syscall_nr = SYSCALL_NR_SCRATCH.load(Ordering::Relaxed);
 
     SYSCALL_COUNT.fetch_add(1, Ordering::Relaxed);
 
     match syscall_nr {
         SYS_EXIT => {
             // Terminate current task
-            crate::serial_println!("[SYSCALL] exit({})", arg1);
+            crate::klog!(Info, "syscall", "exit({})", arg1);
             crate::println!("[SYSCALL] Process PID exited with status {}", arg1);
             {
                 let mut sched = crate::task::SCHEDULER.lock();
@@ -260,7 +267,7 @@ extern "C" fn syscall_dispatch(
             }
         }
         _ => {
-            crate::serial_println!("[SYSCALL] Unknown syscall #{}", syscall_nr);
+            crate::klog!(Warn, "syscall", "Unknown syscall #{}", syscall_nr);
             u64::MAX // -ENOSYS
         }
     }

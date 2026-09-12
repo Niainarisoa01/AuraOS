@@ -11,13 +11,15 @@
 //!
 //! CRITICAL: The bootloader does NOT identity-map the kernel. Virtual addresses
 //! returned by the Rust allocator are NOT equal to their physical addresses.
-//! All page table entries must use physical addresses obtained via `virt_to_phys()`.
+//! Page tables and user pages are therefore allocated from the Physical Memory
+//! Manager (`memory::pmm`), whose frames live in the identity-mapped window
+//! [2 MiB .. 512 MiB) — there, physical address == virtual address, so the
+//! kernel can access them directly.
 
-use alloc::alloc::{alloc_zeroed, dealloc, Layout};
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
 use crate::memory::paging::{
-    read_cr3, write_cr3, virt_to_phys, PhysAddr, VirtAddr, PageTable, page_flags, PAGE_SIZE,
+    read_cr3, write_cr3, PhysAddr, VirtAddr, PageTable, page_flags, PAGE_SIZE,
 };
 
 /// Global snapshot of the initial kernel CR3 register.
@@ -39,19 +41,20 @@ struct PageTableAlloc {
 }
 
 /// Allocates a zeroed, 4096-byte page table aligned to 4 KiB.
-/// Returns both the virtual pointer (for kernel read/write) and the
+/// The frame comes from the Physical Memory Manager and lives in the
+/// identity-mapped window [2 MiB .. 512 MiB): its physical address can be
+/// used directly as a virtual pointer by the kernel.
+/// Returns both the pointer (for kernel read/write) and the
 /// physical address (for use in page table entries and CR3).
 unsafe fn alloc_page_table() -> Option<PageTableAlloc> {
-    let layout = Layout::from_size_align(PAGE_SIZE, PAGE_SIZE).ok()?;
-    let ptr = unsafe { alloc_zeroed(layout) as *mut PageTable };
-    if ptr.is_null() {
-        return None;
+    let phys = crate::memory::pmm::allocate_frame()?;
+    let ptr = phys.as_u64() as *mut PageTable;
+    unsafe {
+        ptr.write_bytes(0u8, 1); // zero the 4 KiB frame
     }
-    // Translate the virtual address to physical using the active page tables
-    let phys = virt_to_phys(ptr as u64)?;
     Some(PageTableAlloc {
         virt: ptr,
-        phys: PhysAddr(phys),
+        phys,
     })
 }
 
@@ -81,13 +84,6 @@ pub fn debug_dump_walk(cr3: u64, virt: u64) {
     crate::serial_println!("[WALK] PT[{}]={:#x}", p1_idx, p1e.0);
 }
 
-/// Tracks a page table mapping between physical frame and virtual pointer.
-#[derive(Clone, Copy)]
-pub struct AllocatedPageTable {
-    pub phys: u64,
-    pub virt: *mut PageTable,
-}
-
 /// Represents an isolated virtual memory address space for a user process.
 #[allow(dead_code)]
 pub struct AddressSpace {
@@ -95,10 +91,9 @@ pub struct AddressSpace {
     pml4_virt: *mut PageTable,
     /// Physical address of the PML4 table (for CR3 and CPU page walks)
     pml4_phys: PhysAddr,
-    /// Tracked page tables (phys -> virt mapping)
-    tables: Vec<AllocatedPageTable>,
-    /// Memory blocks allocated for page tables and user pages (virtual addrs for deallocation)
-    allocated_frames: Vec<*mut u8>,
+    /// Physical addresses of every frame allocated from the PMM
+    /// (page tables + user pages), freed on `Drop`.
+    allocated_frames: Vec<u64>,
 }
 
 impl AddressSpace {
@@ -110,13 +105,7 @@ impl AddressSpace {
 
         let pml4 = unsafe { alloc_page_table()? };
         let mut allocated_frames = Vec::new();
-        let mut tables = Vec::new();
-
-        tables.push(AllocatedPageTable {
-            phys: pml4.phys.as_u64(),
-            virt: pml4.virt,
-        });
-        allocated_frames.push(pml4.virt as *mut u8);
+        allocated_frames.push(pml4.phys.as_u64());
 
         let pml4_virt = pml4.virt;
         let pml4_phys = pml4.phys;
@@ -135,11 +124,7 @@ impl AddressSpace {
                 let kernel_pdpt = kernel_pdpt_phys as *const PageTable;
 
                 let user_pdpt = alloc_page_table()?;
-                tables.push(AllocatedPageTable {
-                    phys: user_pdpt.phys.as_u64(),
-                    virt: user_pdpt.virt,
-                });
-                allocated_frames.push(user_pdpt.virt as *mut u8);
+                allocated_frames.push(user_pdpt.phys.as_u64());
 
                 // Copy all kernel PDPT entries
                 for i in 0..512 {
@@ -163,20 +148,14 @@ impl AddressSpace {
         Some(AddressSpace {
             pml4_virt,
             pml4_phys,
-            tables,
             allocated_frames,
         })
     }
 
     /// Returns the virtual address corresponding to a physical address of a page table.
-    /// If allocated by this AddressSpace, returns its virtual pointer.
-    /// Otherwise falls back to identity mapping (for bootloader low tables).
+    /// All frames allocated by this AddressSpace (and the bootloader's own low
+    /// tables) live in identity-mapped windows, so virtual == physical here.
     fn phys_to_virt(&self, phys: u64) -> *mut PageTable {
-        for t in &self.tables {
-            if t.phys == phys {
-                return t.virt;
-            }
-        }
         phys as *mut PageTable
     }
 
@@ -215,11 +194,7 @@ impl AddressSpace {
                     Some(t) => t,
                     None => return false,
                 };
-                self.tables.push(AllocatedPageTable {
-                    phys: new_table.phys.as_u64(),
-                    virt: new_table.virt,
-                });
-                self.allocated_frames.push(new_table.virt as *mut u8);
+                self.allocated_frames.push(new_table.phys.as_u64());
                 (*pml4).entries[p4_idx].set(
                     new_table.phys,  // Store PHYSICAL address in PTE
                     page_flags::PRESENT | page_flags::WRITABLE | page_flags::USER_ACCESSIBLE,
@@ -238,11 +213,7 @@ impl AddressSpace {
                     Some(t) => t,
                     None => return false,
                 };
-                self.tables.push(AllocatedPageTable {
-                    phys: new_table.phys.as_u64(),
-                    virt: new_table.virt,
-                });
-                self.allocated_frames.push(new_table.virt as *mut u8);
+                self.allocated_frames.push(new_table.phys.as_u64());
                 (*p3_table).entries[p3_idx].set(
                     new_table.phys,
                     page_flags::PRESENT | page_flags::WRITABLE | page_flags::USER_ACCESSIBLE,
@@ -261,11 +232,7 @@ impl AddressSpace {
                     Some(t) => t,
                     None => return false,
                 };
-                self.tables.push(AllocatedPageTable {
-                    phys: new_table.phys.as_u64(),
-                    virt: new_table.virt,
-                });
-                self.allocated_frames.push(new_table.virt as *mut u8);
+                self.allocated_frames.push(new_table.phys.as_u64());
                 (*p2_table).entries[p2_idx].set(
                     new_table.phys,
                     page_flags::PRESENT | page_flags::WRITABLE | page_flags::USER_ACCESSIBLE,
@@ -284,19 +251,17 @@ impl AddressSpace {
         true
     }
 
-    /// Allocates a new physical page from the heap and maps it into user space.
-    /// The physical address is obtained via virt_to_phys() translation.
+    /// Allocates a new physical frame from the PMM and maps it into user space.
+    /// The frame lives in the identity-mapped window, so its physical address
+    /// is directly usable as a kernel pointer (for ELF code copies etc.).
     pub fn allocate_and_map_page(&mut self, virt: VirtAddr, writable: bool) -> Option<*mut u8> {
-        let layout = Layout::from_size_align(PAGE_SIZE, PAGE_SIZE).ok()?;
-        let frame_ptr = unsafe { alloc_zeroed(layout) };
-        if frame_ptr.is_null() {
-            return None;
-        }
+        let phys = crate::memory::pmm::allocate_frame()?;
 
-        self.allocated_frames.push(frame_ptr);
-        // Get the REAL physical address (not virtual!)
-        let phys_addr = virt_to_phys(frame_ptr as u64)?;
-        let phys = PhysAddr(phys_addr);
+        let frame_ptr = phys.as_u64() as *mut u8;
+        unsafe {
+            frame_ptr.write_bytes(0u8, 1); // zero the frame before handing it to user space
+        }
+        self.allocated_frames.push(phys.as_u64());
 
         if self.map_user_page(virt, phys, writable) {
             Some(frame_ptr)
@@ -361,11 +326,9 @@ impl AddressSpace {
 
 impl Drop for AddressSpace {
     fn drop(&mut self) {
-        let layout = Layout::from_size_align(PAGE_SIZE, PAGE_SIZE).unwrap();
-        for &frame in &self.allocated_frames {
-            unsafe {
-                dealloc(frame, layout);
-            }
+        // Free every frame (page tables + user pages) back to the PMM.
+        for &addr in &self.allocated_frames {
+            let _ = crate::memory::pmm::free_frame(PhysAddr(addr));
         }
     }
 }

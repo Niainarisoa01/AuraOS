@@ -8,4 +8,5 @@
 
 pub mod paging;
 pub mod allocator;
+pub mod pmm;
 pub mod user_space;

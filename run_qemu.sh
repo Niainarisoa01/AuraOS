@@ -13,6 +13,8 @@ ENABLE_GDB=0
 FORCE_REBUILD=0
 HEADLESS=0
 ENABLE_NET=1
+SMP_COUNT=1
+ENABLE_DEBUG_EXIT=1
 EXTRA_ARGS=()
 
 while [[ $# -gt 0 ]]; do
@@ -33,14 +35,24 @@ while [[ $# -gt 0 ]]; do
             ENABLE_NET=0
             shift
             ;;
+        --smp)
+            SMP_COUNT="$2"
+            shift 2
+            ;;
+        --no-debug-exit)
+            ENABLE_DEBUG_EXIT=0
+            shift
+            ;;
         --help|-h)
             echo "Usage: $0 [OPTIONS]"
             echo "Options:"
-            echo "  --debug, -d      Enable GDB stub on port 1234 and wait for connection"
-            echo "  --rebuild, -r    Force rebuild of release bootimage before launch"
-            echo "  --nographic, -n  Run headless without VGA window (display none)"
-            echo "  --no-net         Disable e1000 virtual network interface"
-            echo "  --help, -h       Show this help message"
+            echo "  --debug, -d       Enable GDB stub on port 1234 and wait for connection"
+            echo "  --rebuild, -r     Force rebuild of release bootimage before launch"
+            echo "  --nographic, -n   Run headless without VGA window (display none)"
+            echo "  --no-net          Disable e1000 virtual network interface"
+            echo "  --smp N           Number of virtual CPUs (default 1; use 2+ to test SMP)"
+            echo "  --no-debug-exit   Do not attach the isa-debug-exit test device"
+            echo "  --help, -h        Show this help message"
             exit 0
             ;;
         *)
@@ -64,6 +76,8 @@ echo "  - Memory     : 256 MB"
 echo "  - Serial Log : stdio (COM1 UART at 115200 baud)"
 echo "  - Network    : $([ "$ENABLE_NET" -eq 1 ] && echo "e1000 (User NAT)" || echo "Disabled")"
 echo "  - Debug GDB  : $([ "$ENABLE_GDB" -eq 1 ] && echo "Active (:1234, waiting)" || echo "Off")"
+echo "  - CPUs       : $SMP_COUNT"
+echo "  - Test Exit  : $([ "$ENABLE_DEBUG_EXIT" -eq 1 ] && echo "isa-debug-exit (port 0xf4)" || echo "Disabled")"
 echo "============================================================"
 
 # Locate QEMU executable
@@ -84,7 +98,13 @@ CMD=(
     -drive "format=raw,file=$BIN_PATH"
     -m 256M
     -serial stdio
+    -smp "$SMP_COUNT"
 )
+
+if [ "$ENABLE_DEBUG_EXIT" -eq 1 ]; then
+    # isa-debug-exit: write exit code to port 0xf4 (e.g. 0x31 = success for CI)
+    CMD+=(-device "isa-debug-exit,iobase=0xf4")
+fi
 
 if [ "$ENABLE_NET" -eq 1 ]; then
     CMD+=(

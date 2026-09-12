@@ -408,7 +408,7 @@ pub fn reap_dead_tasks() -> usize {
     }
 
     if reaped > 0 {
-        crate::serial_println!("[Scheduler] Reaped {} dead task(s), {} remaining", reaped, sched.tasks.len());
+        crate::klog!(Info, "scheduler", "Reaped {} dead task(s), {} remaining", reaped, sched.tasks.len());
     }
     reaped
 }
@@ -543,6 +543,13 @@ pub fn timer_tick() {
 /// If the current task's quantum has expired, forces a context switch.
 /// Returns true if a preemption occurred.
 pub fn preempt_schedule() -> bool {
+    // Periodically reap dead tasks (about once every 250 ms at 100 Hz).
+    // This frees stacks of tasks that self-terminated via `SYS_EXIT` or a
+    // natural worker exit, which are otherwise never cleaned up.
+    if crate::arch::idt::ticks().is_multiple_of(25) {
+        reap_dead_tasks();
+    }
+
     let result = {
         let mut sched = SCHEDULER.lock();
         if sched.tasks.is_empty() || sched.tasks.len() < 2 {
