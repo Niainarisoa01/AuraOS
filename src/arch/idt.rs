@@ -158,20 +158,75 @@ extern "x86-interrupt" fn general_protection_fault_handler(frame: InterruptStack
 
 /// Exception 14: Page Fault (#PF).
 extern "x86-interrupt" fn page_fault_handler(frame: InterruptStackFrame, error_code: u64) {
-    unsafe {
-        crate::drivers::serial::SERIAL1.force_unlock();
-        crate::drivers::vga::WRITER.force_unlock();
-    }
     let faulting_address: u64;
     unsafe {
         core::arch::asm!("mov {}, cr2", out(reg) faulting_address, options(nomem, nostack, preserves_flags));
     }
-    crate::serial_println!("\n[FATAL CPU EXCEPTION] Page Fault (#PF) at Addr: {:#x}, Flags: {:#b}, RIP: {:#x}",
-        faulting_address, error_code, frame.instruction_pointer);
-    crate::println!("\n[FATAL CPU EXCEPTION] Page Fault (#PF)");
-    crate::println!("  Accessed Address (CR2) : {:#x}", faulting_address);
-    crate::println!("  Error Code Flags       : {:#b}", error_code);
-    crate::println!("  Faulting RIP           : {:#x}", frame.instruction_pointer);
+
+    let is_present = (error_code & 1) != 0;
+    let is_write = (error_code & 2) != 0;
+    let is_user = (error_code & 4) != 0;
+
+    // 1. Demand Paging resolution:
+    // If the page was NOT present, attempt lazy page fault resolution on the active address space
+    if !is_present {
+        if crate::task::handle_current_page_fault(faulting_address, is_write) {
+            // Frame allocated, zeroed, mapped into user page table and TLB invalidated.
+            // Returning from this ISR executes `iretq`, and the CPU restarts the faulting instruction!
+            return;
+        }
+    }
+
+    // 2. If fault could not be resolved, unlock serial/VGA for fatal diagnostic reporting
+    unsafe {
+        crate::drivers::serial::SERIAL1.force_unlock();
+        crate::drivers::vga::WRITER.force_unlock();
+    }
+
+    // Check if it's a guard page hit (stack overflow detection!)
+    let in_guard = crate::task::is_current_guard_page(faulting_address);
+    if in_guard {
+        crate::serial_println!(
+            "\n[GUARD PAGE VIOLATION] Stack Overflow detected at {:#x}! RIP: {:#x}",
+            faulting_address, frame.instruction_pointer
+        );
+        crate::println!(
+            "\n[SECURITY] Stack overflow detected (Guard page hit at {:#x})!",
+            faulting_address
+        );
+    } else {
+        crate::serial_println!("\n[FATAL CPU EXCEPTION] Page Fault (#PF) at Addr: {:#x}, Flags: {:#b}, RIP: {:#x}",
+            faulting_address, error_code, frame.instruction_pointer);
+        crate::println!("\n[FATAL CPU EXCEPTION] Page Fault (#PF)");
+        crate::println!("  Accessed Address (CR2) : {:#x}", faulting_address);
+        crate::println!("  Error Code Flags       : {:#b}", error_code);
+        crate::println!("  Faulting RIP           : {:#x}", frame.instruction_pointer);
+    }
+
+    // If it's a user mode task, terminate it gracefully rather than halting the entire OS
+    if is_user {
+        let cpu_id = crate::arch::smp::current_cpu();
+        let cpu_id = if cpu_id < crate::arch::smp::MAX_CPUS { cpu_id } else { 0 };
+        {
+            let mut sched = crate::task::CPU_SCHEDULERS[cpu_id].lock();
+            let curr = sched.current;
+            if curr < sched.tasks.len() {
+                crate::serial_println!(
+                    "[Process] Terminating user task '{}' (TID {}) due to unhandled Page Fault.",
+                    sched.tasks[curr].name, sched.tasks[curr].id
+                );
+                sched.tasks[curr].state = crate::task::TaskState::Dead;
+            }
+        }
+        // Yield to next ready task
+        crate::task::yield_now();
+        // If execution somehow reaches here, halt this core until next interrupt
+        loop {
+            unsafe { core::arch::asm!("sti; hlt", options(nomem, nostack, preserves_flags)) };
+        }
+    }
+
+    // Kernel mode unhandled page fault: halt system
     loop {
         unsafe { core::arch::asm!("hlt", options(nomem, nostack, preserves_flags)) };
     }

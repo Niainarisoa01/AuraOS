@@ -21,6 +21,12 @@ use core::sync::atomic::{AtomicU64, Ordering};
 use crate::memory::paging::{
     read_cr3, write_cr3, PhysAddr, VirtAddr, PageTable, page_flags, PAGE_SIZE,
 };
+#[allow(unused_imports)]
+use crate::memory::vmm::{
+    VmArea, VmmError, PROT_NONE, PROT_READ, PROT_WRITE, PROT_EXEC, MAP_PRIVATE, MAP_SHARED,
+    MAP_ANONYMOUS, MAP_FIXED, MAP_POPULATE, MMAP_BASE_START, MMAP_BASE_END, align_up_page,
+    align_down_page,
+};
 
 /// Global snapshot of the initial kernel CR3 register.
 pub static KERNEL_CR3: AtomicU64 = AtomicU64::new(0);
@@ -94,8 +100,16 @@ pub struct AddressSpace {
     /// Physical addresses of every frame allocated from the PMM
     /// (page tables + user pages), freed on `Drop`.
     allocated_frames: Vec<u64>,
+    /// Virtual memory areas registered for this process
+    vmas: Vec<VmArea>,
+    /// Next address hint for anonymous mmap allocations
+    mmap_bump_ptr: u64,
 }
 
+unsafe impl Send for AddressSpace {}
+unsafe impl Sync for AddressSpace {}
+
+#[allow(dead_code)]
 impl AddressSpace {
     /// Creates a new isolated address space with kernel mappings preserved.
     pub fn new() -> Option<Self> {
@@ -149,6 +163,8 @@ impl AddressSpace {
             pml4_virt,
             pml4_phys,
             allocated_frames,
+            vmas: Vec::new(),
+            mmap_bump_ptr: MMAP_BASE_START,
         })
     }
 
@@ -293,16 +309,397 @@ impl AddressSpace {
         true
     }
 
-    /// Allocates a user-space stack of `num_pages` pages ending at `top_virt`.
+    /// Allocates a user-space stack of `num_pages` pages ending at `top_virt`,
+    /// registers a [stack] VMA, and installs a guard page directly beneath it.
     pub fn allocate_user_stack(&mut self, top_virt: VirtAddr, num_pages: usize) -> bool {
+        let stack_size = num_pages * PAGE_SIZE;
+        let stack_base = top_virt.as_u64() - stack_size as u64;
+
+        // 1. Install 4 KiB unmapped guard page directly below the stack
+        let guard_base = stack_base - PAGE_SIZE as u64;
+        let _ = self.add_guard_page(guard_base, PAGE_SIZE);
+
+        // 2. Allocate and map user stack physical frames
         for i in 1..=num_pages {
             let page_virt = VirtAddr(top_virt.as_u64() - (i * PAGE_SIZE) as u64);
             if self.allocate_and_map_page(page_virt, true).is_none() {
                 return false;
             }
         }
+
+        // 3. Register [stack] VMA
+        let mut vma = VmArea::new(
+            stack_base,
+            stack_size,
+            PROT_READ | PROT_WRITE,
+            MAP_PRIVATE | MAP_ANONYMOUS,
+            false,
+            "[stack]",
+        );
+        for i in 1..=num_pages {
+            let page_virt = top_virt.as_u64() - (i * PAGE_SIZE) as u64;
+            // Record populated page
+            vma.populated_pages.insert(page_virt, 0); // physical addr tracked in allocated_frames
+        }
+        let _ = self.add_vma(vma);
+
         true
     }
+
+    /// Returns a slice of all active Virtual Memory Areas.
+    pub fn vmas(&self) -> &[VmArea] {
+        &self.vmas
+    }
+
+    /// Returns a mutable reference to the list of Virtual Memory Areas.
+    pub fn vmas_mut(&mut self) -> &mut Vec<VmArea> {
+        &mut self.vmas
+    }
+
+    /// Registers a new Virtual Memory Area, ensuring no overlaps exist.
+    pub fn add_vma(&mut self, vma: VmArea) -> Result<(), VmmError> {
+        if vma.size == 0 || (vma.start & (PAGE_SIZE as u64 - 1)) != 0 {
+            return Err(VmmError::InvalidArguments);
+        }
+        for existing in &self.vmas {
+            if existing.overlaps(vma.start, vma.size) {
+                return Err(VmmError::Overlap);
+            }
+        }
+        self.vmas.push(vma);
+        Ok(())
+    }
+
+    /// Locates the VMA containing the given virtual address.
+    pub fn find_vma(&self, addr: u64) -> Option<&VmArea> {
+        self.vmas.iter().find(|vma| vma.contains(addr))
+    }
+
+    /// Locates a mutable reference to the VMA containing the given virtual address.
+    pub fn find_vma_mut(&mut self, addr: u64) -> Option<&mut VmArea> {
+        self.vmas.iter_mut().find(|vma| vma.contains(addr))
+    }
+
+    /// Returns true if the address corresponds to an unmapped guard page.
+    pub fn is_guard_page(&self, addr: u64) -> bool {
+        if let Some(vma) = self.find_vma(addr) {
+            vma.is_guard_page || vma.prot == PROT_NONE
+        } else {
+            false
+        }
+    }
+
+    /// Registers an unmapped guard page (PROT_NONE) to detect stack overflows.
+    pub fn add_guard_page(&mut self, guard_addr: u64, size: usize) -> Result<(), VmmError> {
+        let vma = VmArea::new(
+            guard_addr,
+            size,
+            PROT_NONE,
+            MAP_PRIVATE | MAP_ANONYMOUS,
+            true,
+            "[guard]",
+        );
+        self.add_vma(vma)
+    }
+
+    /// Unmaps a single 4 KiB virtual page and returns its physical address if it was present.
+    pub fn unmap_user_page(&mut self, virt: VirtAddr) -> Option<PhysAddr> {
+        let p4_idx = virt.p4_index();
+        let p3_idx = virt.p3_index();
+        let p2_idx = virt.p2_index();
+        let p1_idx = virt.p1_index();
+
+        unsafe {
+            let pml4 = self.pml4_virt;
+            if !(*pml4).entries[p4_idx].is_present() {
+                return None;
+            }
+
+            let p3_phys = (*pml4).entries[p4_idx].addr().as_u64();
+            let p3_table = self.phys_to_virt(p3_phys);
+            if !(*p3_table).entries[p3_idx].is_present() {
+                return None;
+            }
+
+            let p2_phys = (*p3_table).entries[p3_idx].addr().as_u64();
+            let p2_table = self.phys_to_virt(p2_phys);
+            if !(*p2_table).entries[p2_idx].is_present() {
+                return None;
+            }
+
+            let p1_phys = (*p2_table).entries[p2_idx].addr().as_u64();
+            let p1_table = self.phys_to_virt(p1_phys);
+            let entry = &mut (*p1_table).entries[p1_idx];
+            if !entry.is_present() {
+                return None;
+            }
+
+            let phys = entry.addr();
+            entry.set_unused();
+
+            // Invalidate TLB entry for this virtual address
+            crate::memory::paging::flush_tlb_page(virt);
+
+            // Remove from allocated_frames tracking so Drop won't double-free it
+            if let Some(pos) = self.allocated_frames.iter().position(|&x| x == phys.as_u64()) {
+                self.allocated_frames.remove(pos);
+            }
+
+            Some(phys)
+        }
+    }
+
+    /// Allocates a virtual memory region (POSIX mmap).
+    /// If MAP_ANONYMOUS without MAP_POPULATE, physical frames are NOT allocated
+    /// immediately (Demand Paging via #PF page fault).
+    pub fn mmap(
+        &mut self,
+        addr_hint: Option<u64>,
+        length: usize,
+        prot: u32,
+        flags: u32,
+    ) -> Result<u64, VmmError> {
+        if length == 0 {
+            return Err(VmmError::InvalidArguments);
+        }
+
+        let aligned_len = align_up_page(length as u64) as usize;
+        let vaddr = if (flags & MAP_FIXED) != 0 {
+            let req = addr_hint.ok_or(VmmError::InvalidAddress)?;
+            if (req & (PAGE_SIZE as u64 - 1)) != 0 {
+                return Err(VmmError::InvalidAddress);
+            }
+            // Check overlaps
+            for existing in &self.vmas {
+                if existing.overlaps(req, aligned_len) {
+                    return Err(VmmError::Overlap);
+                }
+            }
+            req
+        } else {
+            // Find a free virtual range starting at hint or bump pointer
+            let mut candidate = addr_hint
+                .map(align_up_page)
+                .filter(|&a| a >= MMAP_BASE_START && a < MMAP_BASE_END)
+                .unwrap_or_else(|| align_up_page(self.mmap_bump_ptr));
+
+            if candidate < MMAP_BASE_START {
+                candidate = MMAP_BASE_START;
+            }
+
+            let mut found = false;
+            while candidate + aligned_len as u64 <= MMAP_BASE_END {
+                let mut conflict = false;
+                for existing in &self.vmas {
+                    if existing.overlaps(candidate, aligned_len) {
+                        candidate = align_up_page(existing.end());
+                        conflict = true;
+                        break;
+                    }
+                }
+                if !conflict {
+                    found = true;
+                    break;
+                }
+            }
+
+            if !found {
+                return Err(VmmError::OutOfMemory);
+            }
+
+            self.mmap_bump_ptr = align_up_page(candidate + aligned_len as u64);
+            candidate
+        };
+
+        let mut vma = VmArea::new(vaddr, aligned_len, prot, flags, false, "[mmap]");
+
+        // If MAP_POPULATE was explicitly requested, eagerly allocate and map all frames
+        if (flags & MAP_POPULATE) != 0 {
+            let mut offset = 0;
+            while offset < aligned_len {
+                let page_virt = vaddr + offset as u64;
+                let phys = match crate::memory::pmm::allocate_frame() {
+                    Some(p) => p,
+                    None => {
+                        let _ = self.munmap(vaddr, offset);
+                        return Err(VmmError::OutOfMemory);
+                    }
+                };
+
+                unsafe {
+                    (phys.as_u64() as *mut u8).write_bytes(0, PAGE_SIZE);
+                }
+                self.allocated_frames.push(phys.as_u64());
+
+                let writable = (prot & PROT_WRITE) != 0;
+                if !self.map_user_page(VirtAddr(page_virt), phys, writable) {
+                    let _ = crate::memory::pmm::free_frame(phys);
+                    let _ = self.munmap(vaddr, offset);
+                    return Err(VmmError::OutOfMemory);
+                }
+
+                vma.populated_pages.insert(page_virt, phys.as_u64());
+                offset += PAGE_SIZE;
+            }
+        }
+
+        self.vmas.push(vma);
+        Ok(vaddr)
+    }
+
+    /// Releases a virtual memory region (POSIX munmap).
+    /// Unmaps present pages, returns physical frames to PMM, and updates or removes VMAs.
+    pub fn munmap(&mut self, addr: u64, length: usize) -> Result<(), VmmError> {
+        if length == 0 || (addr & (PAGE_SIZE as u64 - 1)) != 0 {
+            return Err(VmmError::InvalidArguments);
+        }
+
+        let aligned_len = align_up_page(length as u64) as usize;
+        let unmap_start = addr;
+        let unmap_end = addr + aligned_len as u64;
+
+        // 1. Unmap and free physical frames in the range
+        let mut curr = unmap_start;
+        while curr < unmap_end {
+            if let Some(phys) = self.unmap_user_page(VirtAddr(curr)) {
+                let _ = crate::memory::pmm::free_frame(phys);
+            }
+            curr += PAGE_SIZE as u64;
+        }
+
+        // 2. Update or remove affected VMAs
+        let mut i = 0;
+        while i < self.vmas.len() {
+            let vma = &mut self.vmas[i];
+            if !vma.overlaps(unmap_start, aligned_len) {
+                i += 1;
+                continue;
+            }
+
+            // Remove populated pages in the unmapped range
+            let mut keys_to_remove = Vec::new();
+            for &page_addr in vma.populated_pages.keys() {
+                if page_addr >= unmap_start && page_addr < unmap_end {
+                    keys_to_remove.push(page_addr);
+                }
+            }
+            for k in keys_to_remove {
+                vma.populated_pages.remove(&k);
+            }
+
+            let vma_start = vma.start;
+            let vma_end = vma.end();
+
+            if unmap_start <= vma_start && unmap_end >= vma_end {
+                // Entire VMA is covered -> remove it
+                self.vmas.remove(i);
+            } else if unmap_start <= vma_start && unmap_end < vma_end {
+                // Trim the beginning of VMA
+                vma.start = unmap_end;
+                vma.size = (vma_end - unmap_end) as usize;
+                i += 1;
+            } else if unmap_start > vma_start && unmap_end >= vma_end {
+                // Trim the end of VMA
+                vma.size = (unmap_start - vma_start) as usize;
+                i += 1;
+            } else {
+                // Unmapping creates a hole in the middle: split into two VMAs
+                let right_start = unmap_end;
+                let right_size = (vma_end - unmap_end) as usize;
+                let right_prot = vma.prot;
+                let right_flags = vma.flags;
+                let right_is_guard = vma.is_guard_page;
+                let right_name = vma.name;
+
+                // Adjust left side
+                vma.size = (unmap_start - vma_start) as usize;
+
+                // Create right side
+                let mut right_vma = VmArea::new(
+                    right_start,
+                    right_size,
+                    right_prot,
+                    right_flags,
+                    right_is_guard,
+                    right_name,
+                );
+
+                // Move populated pages belonging to right side
+                let mut right_pages = Vec::new();
+                for (&page_addr, &phys) in vma.populated_pages.iter() {
+                    if page_addr >= right_start && page_addr < vma_end {
+                        right_pages.push((page_addr, phys));
+                    }
+                }
+                for (p, phys) in right_pages {
+                    vma.populated_pages.remove(&p);
+                    right_vma.populated_pages.insert(p, phys);
+                }
+
+                self.vmas.insert(i + 1, right_vma);
+                i += 2;
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Demand paging fault resolver called from the Page Fault (#PF) ISR.
+    /// Returns true if the fault was on a valid lazy VMA and a frame was successfully mapped.
+    pub fn handle_demand_fault(&mut self, fault_addr: u64, is_write: bool) -> bool {
+        let vma_idx = match self.vmas.iter().position(|vma| vma.contains(fault_addr)) {
+            Some(idx) => idx,
+            None => return false,
+        };
+
+        let vma = &self.vmas[vma_idx];
+
+        // Guard pages and PROT_NONE pages must trap!
+        if vma.is_guard_page || vma.prot == PROT_NONE {
+            return false;
+        }
+
+        // Permission check: write attempted on non-writable VMA
+        if is_write && !vma.is_writable() {
+            return false;
+        }
+
+        let base_page = align_down_page(fault_addr);
+
+        // Allocate a new physical frame from PMM
+        let phys = match crate::memory::pmm::allocate_frame() {
+            Some(p) => p,
+            None => return false,
+        };
+
+        // Zero the frame before mapping
+        unsafe {
+            (phys.as_u64() as *mut u8).write_bytes(0, PAGE_SIZE);
+        }
+        self.allocated_frames.push(phys.as_u64());
+
+        let writable = vma.is_writable();
+        if !self.map_user_page(VirtAddr(base_page), phys, writable) {
+            let _ = crate::memory::pmm::free_frame(phys);
+            return false;
+        }
+
+        // Invalidate TLB for the new page
+        crate::memory::paging::flush_tlb_page(VirtAddr(base_page));
+
+        // Record in populated pages map
+        self.vmas[vma_idx].populated_pages.insert(base_page, phys.as_u64());
+
+        crate::serial_println!(
+            "[DemandPaging] Resolved #PF at Virt={:#x} -> Phys={:#x} (VMA: '{}')",
+            base_page,
+            phys.as_u64(),
+            self.vmas[vma_idx].name
+        );
+
+        true
+    }
+
 
     /// Activates this address space in the CPU's CR3 control register.
     #[allow(dead_code)]

@@ -291,6 +291,29 @@ pub fn load_elf(data: &[u8]) -> Result<LoadedElf, ElfError> {
             curr_page += PAGE_SIZE as u64;
         }
 
+        // Register the loaded ELF segment as a VMA
+        let seg_prot = {
+            let mut p = 0;
+            if (phdr.p_flags & PF_R) != 0 { p |= crate::memory::vmm::PROT_READ; }
+            if (phdr.p_flags & PF_W) != 0 { p |= crate::memory::vmm::PROT_WRITE; }
+            if (phdr.p_flags & PF_X) != 0 { p |= crate::memory::vmm::PROT_EXEC; }
+            p
+        };
+        let mut vma = crate::memory::vmm::VmArea::new(
+            page_start,
+            (page_end - page_start) as usize,
+            seg_prot,
+            crate::memory::vmm::MAP_PRIVATE,
+            false,
+            "[elf_segment]",
+        );
+        let mut p_addr = page_start;
+        while p_addr < page_end {
+            vma.populated_pages.insert(p_addr, 0);
+            p_addr += PAGE_SIZE as u64;
+        }
+        let _ = space.add_vma(vma);
+
         segments_loaded += 1;
         total_bytes += mem_sz;
     }
@@ -317,14 +340,10 @@ pub fn load_elf(data: &[u8]) -> Result<LoadedElf, ElfError> {
 /// Loads an ELF binary and spawns it as a Ring 3 user process in the scheduler.
 pub fn load_and_spawn(name: &'static str, data: &[u8]) -> Result<usize, ElfError> {
     let loaded = load_elf(data)?;
-    let pml4_phys = loaded.space.pml4_phys().as_u64();
     let entry = loaded.entry_point;
     let stack_top = loaded.user_stack_top;
 
-    // Retain address space memory for the lifetime of the process
-    core::mem::forget(loaded.space);
-
-    let pid = crate::task::spawn_user(name, entry, stack_top, pml4_phys);
+    let pid = crate::task::spawn_user_with_space(name, entry, stack_top, loaded.space);
     Ok(pid)
 }
 

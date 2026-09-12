@@ -54,6 +54,8 @@ pub const SYS_CLOSE: u64 = 6;
 #[allow(dead_code)]
 pub const SYS_MMAP: u64 = 9;
 #[allow(dead_code)]
+pub const SYS_MUNMAP: u64 = 11;
+#[allow(dead_code)]
 pub const SYS_YIELD: u64 = 24;
 #[allow(dead_code)]
 pub const SYS_SLEEP: u64 = 35;
@@ -217,6 +219,46 @@ extern "C" fn syscall_dispatch(
             let sched = crate::task::CPU_SCHEDULERS[cpu_id].lock();
             sched.tasks[sched.current].id as u64
         }
+        SYS_MMAP => {
+            let addr_hint = if arg1 != 0 { Some(arg1) } else { None };
+            let length = arg2 as usize;
+            let prot = arg3 as u32;
+            let flags = arg4 as u32;
+
+            let mut sched = crate::task::CPU_SCHEDULERS[cpu_id].lock();
+            let curr = sched.current;
+            if curr < sched.tasks.len() {
+                if let Some(ref mut space) = sched.tasks[curr].address_space {
+                    match space.mmap(addr_hint, length, prot, flags) {
+                        Ok(mapped_vaddr) => mapped_vaddr,
+                        Err(_) => u64::MAX, // -1 (MAP_FAILED)
+                    }
+                } else {
+                    u64::MAX
+                }
+            } else {
+                u64::MAX
+            }
+        }
+        SYS_MUNMAP => {
+            let addr = arg1;
+            let length = arg2 as usize;
+
+            let mut sched = crate::task::CPU_SCHEDULERS[cpu_id].lock();
+            let curr = sched.current;
+            if curr < sched.tasks.len() {
+                if let Some(ref mut space) = sched.tasks[curr].address_space {
+                    match space.munmap(addr, length) {
+                        Ok(()) => 0,
+                        Err(_) => u64::MAX, // -1 (EINVAL)
+                    }
+                } else {
+                    u64::MAX
+                }
+            } else {
+                u64::MAX
+            }
+        }
         SYS_YIELD => {
             let _ = syscall_nr; // unused after this
             crate::task::yield_now();
@@ -275,6 +317,20 @@ extern "C" fn syscall_dispatch(
             u64::MAX // -ENOSYS
         }
     }
+}
+
+/// Programmatic invocation helper for kernel diagnostics, unit tests, and self-tests.
+pub fn dispatch_syscall(
+    nr: u64,
+    arg1: u64,
+    arg2: u64,
+    arg3: u64,
+    arg4: u64,
+    arg5: u64,
+    arg6: u64,
+) -> u64 {
+    SYSCALL_NR_SCRATCH.store(nr, Ordering::SeqCst);
+    syscall_dispatch(arg1, arg2, arg3, arg4, arg5, arg6)
 }
 
 /// Configures the syscall/sysret MSRs for the CURRENT CPU.

@@ -68,6 +68,8 @@ pub struct Task {
     pub user_entry: u64,
     /// User stack pointer top (RSP)
     pub user_stack_top: u64,
+    /// Owned per-process address space (freed automatically when task is reaped)
+    pub address_space: Option<crate::memory::user_space::AddressSpace>,
 }
 
 /// Trampoline executed when a user-space task is scheduled for the first time.
@@ -126,6 +128,7 @@ impl Task {
             kernel_stack_top: 0,
             user_entry: 0,
             user_stack_top: 0,
+            address_space: None,
         }
     }
 
@@ -171,7 +174,22 @@ impl Task {
             kernel_stack_top: kstack_top as u64,
             user_entry: entry_point,
             user_stack_top,
+            address_space: None,
         }
+    }
+
+    /// Creates a new user-space (Ring 3) task with an owned per-process AddressSpace.
+    pub fn new_user_with_space(
+        id: usize,
+        name: &'static str,
+        entry_point: u64,
+        user_stack_top: u64,
+        space: crate::memory::user_space::AddressSpace,
+    ) -> Self {
+        let cr3 = space.pml4_phys().as_u64();
+        let mut task = Self::new_user(id, name, entry_point, user_stack_top, cr3);
+        task.address_space = Some(space);
+        task
     }
 
     /// Creates the root task representing the kernel shell / boot thread on the BSP.
@@ -196,6 +214,7 @@ impl Task {
             kernel_stack_top: 0,
             user_entry: 0,
             user_stack_top: 0,
+            address_space: None,
         }
     }
 }
@@ -498,6 +517,59 @@ pub fn spawn_user(name: &'static str, entry_point: u64, user_stack_top: u64, cr3
     crate::serial_println!("[Multitasking] Spawned user task '{}' (TID {}) on CPU #{}", name, tid, target_cpu);
     tid
 }
+
+/// Spawns a new user space task with an owned AddressSpace.
+pub fn spawn_user_with_space(
+    name: &'static str,
+    entry_point: u64,
+    user_stack_top: u64,
+    space: crate::memory::user_space::AddressSpace,
+) -> usize {
+    let tid = NEXT_TASK_ID.fetch_add(1, Ordering::SeqCst);
+    let task = Task::new_user_with_space(tid, name, entry_point, user_stack_top, space);
+    let target_cpu = choose_target_cpu();
+    let mut sched = CPU_SCHEDULERS[target_cpu].lock();
+    sched.tasks.push(task);
+    crate::serial_println!(
+        "[Multitasking] Spawned user task '{}' (TID {}) with owned AddressSpace on CPU #{}",
+        name,
+        tid,
+        target_cpu
+    );
+    tid
+}
+
+/// Demand paging fault handler called by the Page Fault (#PF) ISR.
+/// Resolves unmapped pages for the currently running task if an AddressSpace is present.
+pub fn handle_current_page_fault(fault_addr: u64, is_write: bool) -> bool {
+    let cpu_id = crate::arch::smp::current_cpu();
+    let cpu_id = if cpu_id < crate::arch::smp::MAX_CPUS { cpu_id } else { 0 };
+
+    let mut sched = CPU_SCHEDULERS[cpu_id].lock();
+    let curr = sched.current;
+    if curr < sched.tasks.len() {
+        if let Some(ref mut space) = sched.tasks[curr].address_space {
+            return space.handle_demand_fault(fault_addr, is_write);
+        }
+    }
+    false
+}
+
+/// Checks whether the fault address falls in a guard page of the current task.
+pub fn is_current_guard_page(fault_addr: u64) -> bool {
+    let cpu_id = crate::arch::smp::current_cpu();
+    let cpu_id = if cpu_id < crate::arch::smp::MAX_CPUS { cpu_id } else { 0 };
+
+    let sched = CPU_SCHEDULERS[cpu_id].lock();
+    let curr = sched.current;
+    if curr < sched.tasks.len() {
+        if let Some(ref space) = sched.tasks[curr].address_space {
+            return space.is_guard_page(fault_addr);
+        }
+    }
+    false
+}
+
 
 /// Attempts to steal a ready task from another CPU.
 /// To avoid deadlocks, locks are acquired one at a time and never held nested.

@@ -2,12 +2,12 @@
 
 > **Date d'audit approfondi :** 12 Septembre 2026  
 > **Version analysée :** v0.1.0-alpha  
-> **Métriques réelles :** 14 078 lignes de Rust pur (`#![no_std]`) · 48 fichiers · 520 Ko (binaire noyau release) · 567 Ko (image bootable disque) · 0 erreur · 0 warning · 37 tests automatisés (100% PASS)  
+> **Métriques réelles :** 14 620 lignes de Rust pur (`#![no_std]`) · 49 fichiers · 522 Ko (binaire noyau release) · 569 Ko (image bootable disque) · 0 erreur · 0 warning · 38 tests automatisés (100% PASS)  
 >
 > **Synthèse d'évaluation :** Ce document constitue l'audit de référence technique d'AuraOS, confronté directement au code source réel du dépôt. Sur les 25 points de limitation identifiés initialement (I1–I25) :  
-> - **16 inconvénients sont désormais entièrement résolus et validés** (dont les chantiers de fond majeurs **I4 — SMP Multi-Core** et **I5 — Gestionnaire de mémoire physique PMM**).  
+> - **17 inconvénients sont désormais entièrement résolus et validés** (dont les chantiers de fond majeurs **I4 — SMP Multi-Core**, **I5 — Gestionnaire de mémoire physique PMM**, et **I6 — Mémoire Virtuelle Dynamique & Demand Paging**).  
 > - **2 inconvénients sont partiellement corrigés** (I7 : support `exec` ELF64 Ring 3 actif mais sans `fork`/`waitpid` ; I12 : compositeur GUI BGA activé au boot mais sans widgets interactifs).  
-> - **6 chantiers de fond structurants** restent inscrits dans la feuille de route (I6, I8, I9, I10, I11, I13).  
+> - **5 chantiers de fond structurants** restent inscrits dans la feuille de route (I8, I9, I10, I11, I13).  
 > Le système est passé d'un prototype expérimental mono-cœur à un véritable **système d'exploitation x86_64 SMP multi-cœur préemptif**, autonome, robuste et vérifié à 100% par sa suite d'auto-tests matériels.
 
 ---
@@ -15,9 +15,9 @@
 ## 🌟 Sommaire
 
 1. [✅ Avantages et Forces Techniques (17)](#-avantages-et-forces-techniques-17)
-2. [✅ Inconvénients Entièrement Résolus (16)](#-inconvénients-entièrement-résolus-16)
+2. [✅ Inconvénients Entièrement Résolus (17)](#-inconvénients-entièrement-résolus-17)
 3. [⚠️ Inconvénients Partiellement Résolus (2)](#️-inconvénients-partiellement-résolus-2)
-4. [🟠 Inconvénients Résiduels — Chantiers de Fond (6)](#-inconvénients-résiduels--chantiers-de-fond-6)
+4. [🟠 Inconvénients Résiduels — Chantiers de Fond (5)](#-inconvénients-résiduels--chantiers-de-fond-5)
 5. [📊 Matrice Comparative Complète (A1–A17, I1–I25)](#-matrice-comparative-complète)
 6. [🗺️ Plan d'Action & Feuille de Route Actualisée](#️-plan-daction--feuille-de-route-actualisée)
 
@@ -258,9 +258,9 @@ Le sous-système ACPI (`src/arch/acpi.rs`) ne se limite pas à la lecture :
 
 ---
 
-## ✅ Inconvénients Entièrement Résolus (16)
+## ✅ Inconvénients Entièrement Résolus (17)
 
-> Les 16 points ci-dessous représentaient des limitations ou des anomalies critiques des versions antérieures. Tous ont été résolus dans le code source actuel et validés par compilation et tests QEMU.
+> Les 17 points ci-dessous représentaient des limitations ou des anomalies critiques des versions antérieures. Tous ont été résolus dans le code source actuel et validés par compilation et tests QEMU.
 
 | # | Anomalie ou Manque Initial | Résolution & Implémentation Actuelle | Référence Fichier |
 |:---:|:---|:---|:---|
@@ -269,6 +269,7 @@ Le sous-système ACPI (`src/arch/acpi.rs`) ne se limite pas à la lecture :
 | **I3** | Utilisation de `static mut` dans le dispatch syscall | Remplacement intégral par des primitives atomiques `AtomicU64` thread-safe | `src/arch/syscall.rs` |
 | **I4** | **Absence totale de support SMP multi-cœurs** | **SMP multi-cœur préemptif complet :** INIT-SIPI-SIPI, GDT/TSS per-CPU, timers LAPIC 0x40 (~100 Hz), Schedulers per-CPU, work stealing, tests #35–#37 | `src/arch/smp.rs`, `src/task/mod.rs` |
 | **I5** | **Gestion mémoire dynamique sur buffer statique (8 Mo)** | **PMM Frame Allocator réel :** capture de la carte E820, bitmap [2 MiB..512 MiB), libération réelle des frames au `Drop` de l'`AddressSpace`, test #34 | `src/memory/pmm.rs` |
+| **I6** | **Absence de mémoire virtuelle dynamique (`mmap`, demand paging)** | **VMA, mmap & Demand Paging complets :** allocation paresseuse sans consommation physique anticipée, libération `munmap` avec restitution PMM, gestionnaire `#PF` Page Fault transparent (Vecteur 14, `iretq`), pages de garde (stack guard overflow trap), syscalls `SYS_MMAP` (9) et `SYS_MUNMAP` (11), test #38 | `src/memory/vmm.rs`, `src/memory/user_space.rs`, `src/arch/idt.rs`, `src/arch/syscall.rs` |
 | **I15** | Recherche linéaire $O(n)$ inefficace des boîtes IPC | Refactorisation en `BTreeMap<usize, VecDeque<IpcMessage>>` garantissant un accès en $O(\log n)$ | `src/task/ipc.rs` |
 | **I16** | Primitives d'accès MSR dupliquées dans le code | Centralisation unifiée dans le module dédié `arch::msr` (`rdmsr`, `wrmsr`) | `src/arch/msr.rs` |
 | **I17** | Fuite de descripteurs d'inodes dans le VFS | Mise en place de tombstones et d'une free-list recyclant les numéros d'inodes libérés | `src/fs/mod.rs` |
@@ -292,22 +293,9 @@ Le sous-système ACPI (`src/arch/acpi.rs`) ne se limite pas à la lecture :
 
 ---
 
-## 🟠 Inconvénients Résiduels — Chantiers de Fond (6)
+## 🟠 Inconvénients Résiduels — Chantiers de Fond (5)
 
 > Ces chantiers constituent les prochaines étapes de maturité architecturale du système.
-
----
-
-### 🔴 I6 — Absence de Mémoire Virtuelle Dynamique Avancée
-
-**Constat :**  
-La pagination x86_64 actuelle mappe de manière statique le tas, la pile et les segments des exécutables ELF.
-- Absence d'appels système `mmap()` et `munmap()`.
-- Pas de pagination à la demande (Demand Paging via le handler de `#PF` Page Fault).
-- Pas de mécanisme de Copy-on-Write (COW) nécessaire à un `fork()` performant.
-- Pas de mémoire d'échange (swap) ni de pages de garde (guard pages) pour détecter les débordements de pile.
-
-**Effort estimé :** 2 à 3 semaines de développement.
 
 ---
 
@@ -380,16 +368,16 @@ Le fichier `src/shell/mod.rs` regroupe environ 1 180 lignes de code dans une fon
 | **A4–A6** | Fiabilité | — | Sécurité mémoire Rust, Spinlocks IRQ-safe, Panic handler bi-canal | ✅ **Excellence** |
 | **A7–A9** | Kernel Core | — | Multitâche Round-Robin, Syscalls x86_64, Isolation Ring 0/3 | ✅ **Excellence** |
 | **A10** | Multiprocesseur | — | Support SMP complet : INIT-SIPI-SIPI, PerCpu, LAPIC 0x40, Schedulers Per-CPU | ✅ **Excellence** |
-| **A11** | Mémoire | — | PMM Physical Frame Allocator réel (E820 / Bitmap, libération Drop) | ✅ **Excellence** |
+| **A11** | Mémoire | — | PMM Frame Allocator (E820 / Bitmap) & VMM Demand Paging (`mmap`/`munmap`) | ✅ **Excellence** |
 | **A12–A13** | E/S & Réseau | — | Pile réseau L2–L4 (5 protocoles), VFS dynamique `/proc` et `/dev` | ✅ **Excellence** |
-| **A14–A15** | Système & UI | — | 37 tests automatisés (100%), Shell 25+ commandes, Bureau graphique BGA | ✅ **Excellence** |
-| **A16–A17** | Matériel | — | Gestion ACPI S5 Soft-off, Binaire léger 520 Ko, Boot < 100 ms | ✅ **Excellence** |
+| **A14–A15** | Système & UI | — | 38 tests automatisés (100%), Shell 25+ commandes, Bureau graphique BGA | ✅ **Excellence** |
+| **A16–A17** | Matériel | — | Gestion ACPI S5 Soft-off, Binaire léger 522 Ko, Boot < 100 ms | ✅ **Excellence** |
 | **I1** | Système | 🟡 | Erreur de fréquence `/proc/uptime` (18.2 Hz) | ✅ **Corrigé** |
 | **I2** | Syscall | 🔴 | Numéro de syscall écrasé par `RAX` | ✅ **Corrigé** |
 | **I3** | Concurrence | 🔴 | `static mut` dans le chemin critique des syscalls | ✅ **Corrigé** |
 | **I4** | Architecture | 🔴 | Monoprocesseur strict (aucun support SMP) | ✅ **Corrigé (Chantier I4 fait)** |
 | **I5** | Mémoire | 🔴 | Allocateur sur tampon statique de 8 Mo | ✅ **Corrigé (Chantier I5 fait)** |
-| **I6** | Mémoire | 🔴 | Absence de mémoire virtuelle dynamique (`mmap`, demand paging) | 🔴 **Chantier de fond** |
+| **I6** | Mémoire | 🔴 | Absence de mémoire virtuelle dynamique (`mmap`, demand paging) | ✅ **Corrigé (Chantier I6 fait)** |
 | **I7** | Processus | 🟡 | Manque du modèle `fork`/`waitpid` (ELF64 Ring 3 exécutable) | ⚠️ **Partiellement résolu** |
 | **I8** | Bootloader | 🔴 | Démarrage BIOS legacy uniquement (pas d'UEFI) | 🔴 **Chantier de fond** |
 | **I9** | Fichiers | 🟡 | Racine VFS en RAMFS volatil (FAT32/ATA non lié à `/`) | 🟡 **Chantier de fond** |
@@ -417,7 +405,8 @@ Le fichier `src/shell/mod.rs` regroupe environ 1 180 lignes de code dans une fon
 ### 🎯 Étape Actuelle : Stabilité & Consolidation Immédiate
 - ✅ **I4 (SMP)** : Finalisé et validé à 100% sur 4 cœurs sous QEMU (Tests #35, #36, #37).
 - ✅ **I5 (PMM)** : Finalisé et intégré à la gestion des espaces d'adressage (Test #34).
-- ✅ **Banc de tests** : 37 tests automatisés validés à 100% sans aucun warning de compilation.
+- ✅ **I6 (Demand Paging & mmap)** : Finalisé et validé à 100% (Test #38) avec gestionnaire #PF transparent, VMAs, pages de garde et libération PMM.
+- ✅ **Banc de tests** : 38 tests automatisés validés à 100% sans aucun warning de compilation.
 
 ### 🔜 Prochaine Priorité (Court terme — 1 à 2 semaines)
 1. **Refactorisation du Shell (I13)** : Scission de `src/shell/mod.rs` en sous-modules (`parser`, `builtins`, `commands`) et support des pipes basiques.
@@ -425,7 +414,6 @@ Le fichier `src/shell/mod.rs` regroupe environ 1 180 lignes de code dans une fon
 3. **Primitives de Processus POSIX (I7)** : Ajout des syscalls `SYS_FORK` et `SYS_WAITPID` pour compléter l'exécution des binaires ELF64.
 
 ### 🚀 Évolutions Majeures (Moyen terme — 1 à 3 mois)
-1. **Mémoire Virtuelle Dynamique (I6)** : Implémentation du `mmap`, gestion des fautes de page pour l'allocation à la demande (Demand Paging) et pages de garde.
-2. **Pile Réseau Avancée (I11)** : Ajout d'une machine à états TCP minimale et d'un client DHCP pour l'auto-configuration réseau.
-3. **Migration vers UEFI (I8)** : Transition vers le bootloader moderne Limine ou Bootloader 0.11+ pour le support natif du matériel 64-bit contemporain.
-4. **Pilote AHCI / DMA (I10)** : Remplacement de l'ATA PIO par un contrôleur Serial ATA compatible bus master DMA.
+1. **Pile Réseau Avancée (I11)** : Ajout d'une machine à états TCP minimale et d'un client DHCP pour l'auto-configuration réseau.
+2. **Migration vers UEFI (I8)** : Transition vers le bootloader moderne Limine ou Bootloader 0.11+ pour le support natif du matériel 64-bit contemporain.
+3. **Pilote AHCI / DMA (I10)** : Remplacement de l'ATA PIO par un contrôleur Serial ATA compatible bus master DMA.

@@ -40,6 +40,7 @@
 //! 35. SMP CPU Enumeration & AP Online Check
 //! 36. SMP Per-CPU Independent Schedulers & Run Queues
 //! 37. SMP Load-Balanced Task Distribution & Work Stealing
+//! 38. Dynamic Virtual Memory, mmap, munmap & Demand Paging
 
 use alloc::boxed::Box;
 use alloc::format;
@@ -1489,6 +1490,118 @@ pub fn run_all_tests() -> Vec<TestResult> {
             detail: format!(
                 "TID={}, TargetCPU={}, FoundOnCPU={:?}, Killed={}, ReapedClean={}, Clean={}",
                 spawned_tid, target_cpu, found_on_cpu, killed, !still_present, passed
+            ),
+        });
+    }
+
+    // ========================================================================
+    // Test 38: Dynamic Virtual Memory, mmap, munmap & Demand Paging
+    // ========================================================================
+    {
+        use crate::memory::vmm::{
+            PROT_READ, PROT_WRITE, MAP_ANONYMOUS, MAP_PRIVATE, MMAP_BASE_START,
+        };
+        use crate::memory::user_space::AddressSpace;
+
+        let mut space = AddressSpace::new().expect("AddressSpace creation must succeed");
+
+        // 1. Lazy mmap test: 64 KiB allocation
+        let alloc_len = 64 * 1024;
+        let vaddr = space
+            .mmap(None, alloc_len, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS)
+            .expect("Lazy mmap allocation must succeed");
+        let valid_vaddr = vaddr >= MMAP_BASE_START;
+
+        // Verify demand paging: 0 frames allocated initially in the VMA
+        let vma = space.find_vma(vaddr).expect("VMA must exist for mapped range");
+        let zero_frames_initial = vma.populated_pages.is_empty();
+
+        // 2. Fault resolution (Demand Paging simulation via handle_demand_fault)
+        // Fault on page 0 of VMA (write access)
+        let resolved_p0 = space.handle_demand_fault(vaddr, true);
+        // Fault on page 1 of VMA (read access)
+        let resolved_p1 = space.handle_demand_fault(vaddr + 4096, false);
+        // Read-only fault on non-existent address (must fail)
+        let bad_fault_failed = !space.handle_demand_fault(0x1000, false);
+
+        let vma_after_fault = space.find_vma(vaddr).expect("VMA must exist");
+        let two_pages_populated = vma_after_fault.populated_pages.len() == 2;
+
+        // 3. Guard Page Protection (Stack overflow guard)
+        let guard_addr = 0x0000_0000_7FFE_0000;
+        let guard_created = space.add_guard_page(guard_addr, 4096).is_ok();
+        let is_guard = space.is_guard_page(guard_addr);
+        let guard_trapped = !space.handle_demand_fault(guard_addr, true);
+
+        // 4. Overlap detection
+        let overlap_err = space
+            .mmap(Some(vaddr), 4096, PROT_READ, MAP_PRIVATE | MAP_ANONYMOUS | crate::memory::vmm::MAP_FIXED)
+            .is_err();
+
+        // 5. Unmapping (munmap) & Frame Reclamation
+        let unmap_ok = space.munmap(vaddr, alloc_len).is_ok();
+        let vma_gone = space.find_vma(vaddr).is_none();
+
+        // 6. Syscall verification (SYS_MMAP & SYS_MUNMAP)
+        let cpu_id = crate::arch::smp::current_cpu();
+        let cpu_id = if cpu_id < crate::arch::smp::MAX_CPUS { cpu_id } else { 0 };
+        let test_space = AddressSpace::new().expect("AddressSpace creation");
+        let (sys_mmap_ok, sys_munmap_ok) = {
+            let mut sched = crate::task::CPU_SCHEDULERS[cpu_id].lock();
+            let curr = sched.current;
+            sched.tasks[curr].address_space = Some(test_space);
+            drop(sched);
+
+            let mmap_res = crate::arch::syscall::dispatch_syscall(
+                crate::arch::syscall::SYS_MMAP,
+                0,
+                8192,
+                (PROT_READ | PROT_WRITE) as u64,
+                (MAP_PRIVATE | MAP_ANONYMOUS) as u64,
+                0,
+                0,
+            );
+            let mmap_ok = mmap_res != u64::MAX && mmap_res >= MMAP_BASE_START;
+
+            let munmap_res = crate::arch::syscall::dispatch_syscall(
+                crate::arch::syscall::SYS_MUNMAP,
+                mmap_res,
+                8192,
+                0,
+                0,
+                0,
+                0,
+            );
+            let munmap_ok = munmap_res == 0;
+
+            let mut sched = crate::task::CPU_SCHEDULERS[cpu_id].lock();
+            sched.tasks[curr].address_space = None;
+
+            (mmap_ok, munmap_ok)
+        };
+
+        let passed = valid_vaddr
+            && zero_frames_initial
+            && resolved_p0
+            && resolved_p1
+            && bad_fault_failed
+            && two_pages_populated
+            && guard_created
+            && is_guard
+            && guard_trapped
+            && overlap_err
+            && unmap_ok
+            && vma_gone
+            && sys_mmap_ok
+            && sys_munmap_ok;
+
+        results.push(TestResult {
+            name: "Dynamic Virtual Memory, mmap, munmap & Demand Paging",
+            passed,
+            detail: format!(
+                "LazyMmap={:#x} (InitPages=0: {}), DemandPF(P0={}, P1={}, RejectBad={}), GuardProtected={}, OverlapChecked={}, MunmapOk={}, Syscalls(mmap={}, munmap={})",
+                vaddr, zero_frames_initial, resolved_p0, resolved_p1, bad_fault_failed,
+                guard_trapped, overlap_err, unmap_ok, sys_mmap_ok, sys_munmap_ok
             ),
         });
     }

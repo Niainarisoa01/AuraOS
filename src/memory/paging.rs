@@ -110,6 +110,7 @@ pub mod page_flags {
     pub const DIRTY: u64 = 1 << 6;            // Set by CPU when the page is written to
     pub const HUGE_PAGE: u64 = 1 << 7;        // 2 MiB or 1 GiB page size
     pub const GLOBAL: u64 = 1 << 8;           // Page not flushed from TLB on CR3 reload
+    pub const COW: u64 = 1 << 9;              // Copy-on-Write bit (OS-reserved bit 9)
     pub const NO_EXECUTE: u64 = 1 << 63;      // Instruction fetching disabled (NX bit)
 }
 
@@ -270,6 +271,18 @@ pub fn flush_tlb() {
             "mov rax, cr3",
             "mov cr3, rax",
             out("rax") _,
+            options(nostack, preserves_flags)
+        );
+    }
+}
+
+/// Flushes a single page from the Translation Lookaside Buffer (TLB) via INVLPG.
+#[inline]
+pub fn flush_tlb_page(addr: VirtAddr) {
+    unsafe {
+        core::arch::asm!(
+            "invlpg [{}]",
+            in(reg) addr.as_u64(),
             options(nostack, preserves_flags)
         );
     }
