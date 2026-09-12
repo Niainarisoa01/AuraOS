@@ -145,7 +145,34 @@ pub fn init() -> bool {
     true
 }
 
+/// Standard interrupt vector allocated for the Local APIC periodic timer.
+pub const LAPIC_TIMER_VECTOR: u8 = 0x40; // Vector 64
+
 /// Helper to send an End of Interrupt (EOI) from interrupt service routines.
+#[inline]
 pub fn send_eoi() {
-    LOCAL_APIC.lock().send_eoi();
+    unsafe {
+        core::ptr::write_volatile(0xFEE0_00B0 as *mut u32, 0);
+    }
 }
+
+/// Initializes the Local APIC Timer on the calling CPU core in Periodic mode.
+///   - `vector`: The interrupt vector to trigger on timer expiry (e.g. 0x40)
+///   - `initial_count`: Initial counter reload value
+pub fn init_timer(vector: u8, initial_count: u32) {
+    let lapic_base = 0xFEE0_0000u64;
+    unsafe {
+        // 1. Configure Divider to divide bus clock by 16 (0x03)
+        let div_addr = (lapic_base + REG_TIMER_DIV as u64) as *mut u32;
+        core::ptr::write_volatile(div_addr, 0x03);
+
+        // 2. Configure LVT Timer register: Periodic mode (bit 17 = 1), vector in [7:0], unmasked (bit 16 = 0)
+        let lvt_addr = (lapic_base + REG_LVT_TIMER as u64) as *mut u32;
+        core::ptr::write_volatile(lvt_addr, (1 << 17) | (vector as u32));
+
+        // 3. Set Initial Count register to start countdown
+        let init_addr = (lapic_base + REG_TIMER_INIT as u64) as *mut u32;
+        core::ptr::write_volatile(init_addr, initial_count);
+    }
+}
+

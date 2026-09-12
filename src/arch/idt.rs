@@ -93,6 +93,10 @@ pub struct InterruptStackFrame {
 
 /// Exception 0: Divide-by-Zero (#DE).
 extern "x86-interrupt" fn divide_by_zero_handler(frame: InterruptStackFrame) {
+    unsafe {
+        crate::drivers::serial::SERIAL1.force_unlock();
+        crate::drivers::vga::WRITER.force_unlock();
+    }
     crate::serial_println!("\n[FATAL CPU EXCEPTION] Divide by Zero (#DE) at RIP: {:#x}", frame.instruction_pointer);
     crate::println!("\n[FATAL CPU EXCEPTION] Divide by Zero (#DE)");
     crate::println!("  Faulting RIP: {:#x}", frame.instruction_pointer);
@@ -103,6 +107,10 @@ extern "x86-interrupt" fn divide_by_zero_handler(frame: InterruptStackFrame) {
 
 /// Exception 6: Invalid Opcode (#UD).
 extern "x86-interrupt" fn invalid_opcode_handler(frame: InterruptStackFrame) {
+    unsafe {
+        crate::drivers::serial::SERIAL1.force_unlock();
+        crate::drivers::vga::WRITER.force_unlock();
+    }
     crate::serial_println!("\n[FATAL CPU EXCEPTION] Invalid Opcode (#UD) at RIP: {:#x}", frame.instruction_pointer);
     crate::println!("\n[FATAL CPU EXCEPTION] Invalid Opcode (#UD)");
     crate::println!("  Faulting RIP: {:#x}", frame.instruction_pointer);
@@ -113,6 +121,10 @@ extern "x86-interrupt" fn invalid_opcode_handler(frame: InterruptStackFrame) {
 
 /// Exception 8: Double Fault (#DF).
 extern "x86-interrupt" fn double_fault_handler(frame: InterruptStackFrame, error_code: u64) -> ! {
+    unsafe {
+        crate::drivers::serial::SERIAL1.force_unlock();
+        crate::drivers::vga::WRITER.force_unlock();
+    }
     let cr2: u64;
     unsafe {
         core::arch::asm!("mov {}, cr2", out(reg) cr2, options(nomem, nostack, preserves_flags));
@@ -131,6 +143,10 @@ extern "x86-interrupt" fn double_fault_handler(frame: InterruptStackFrame, error
 
 /// Exception 13: General Protection Fault (#GP).
 extern "x86-interrupt" fn general_protection_fault_handler(frame: InterruptStackFrame, error_code: u64) {
+    unsafe {
+        crate::drivers::serial::SERIAL1.force_unlock();
+        crate::drivers::vga::WRITER.force_unlock();
+    }
     crate::serial_println!("\n[FATAL CPU EXCEPTION] General Protection Fault (#GP) Code: {:#x}, RIP: {:#x}", error_code, frame.instruction_pointer);
     crate::println!("\n[FATAL CPU EXCEPTION] General Protection Fault (#GP)");
     crate::println!("  Error Code  : {:#x}", error_code);
@@ -142,6 +158,10 @@ extern "x86-interrupt" fn general_protection_fault_handler(frame: InterruptStack
 
 /// Exception 14: Page Fault (#PF).
 extern "x86-interrupt" fn page_fault_handler(frame: InterruptStackFrame, error_code: u64) {
+    unsafe {
+        crate::drivers::serial::SERIAL1.force_unlock();
+        crate::drivers::vga::WRITER.force_unlock();
+    }
     let faulting_address: u64;
     unsafe {
         core::arch::asm!("mov {}, cr2", out(reg) faulting_address, options(nomem, nostack, preserves_flags));
@@ -171,6 +191,16 @@ extern "x86-interrupt" fn timer_handler(_frame: InterruptStackFrame) {
     super::pic::send_eoi(super::pic::IRQ_TIMER);
     // Attempt preemptive context switch if current task's quantum expired
     crate::task::preempt_schedule();
+}
+
+/// Local APIC Timer interrupt handler (Vector 0x40 = 64).
+/// Fires periodically on each CPU core (BSP + APs) to drive independent
+/// quantum accounting and preemptive scheduling.
+extern "x86-interrupt" fn lapic_timer_handler(_frame: InterruptStackFrame) {
+    // 1. Acknowledge interrupt to Local APIC
+    super::apic::send_eoi();
+    // 2. Drive per-CPU scheduling and preemption
+    crate::task::smp_timer_tick();
 }
 
 /// IRQ 1: PS/2 Keyboard Keystroke.
@@ -215,6 +245,11 @@ pub fn init() {
             .set_handler(keyboard_handler as *const () as u64);
         (*idt)[super::pic::PIC1_OFFSET as usize + super::pic::IRQ_MOUSE as usize]
             .set_handler(mouse_handler as *const () as u64);
+
+        // Local APIC Timer (Vector 0x40 = 64) for per-CPU preemptive multitasking
+        (*idt)[super::apic::LAPIC_TIMER_VECTOR as usize]
+            .set_handler(lapic_timer_handler as *const () as u64);
+
 
         let idt_ptr = IdtPointer {
             limit: (core::mem::size_of::<[IdtEntry; IDT_ENTRIES]>() - 1) as u16,

@@ -20,15 +20,15 @@ use core::cell::UnsafeCell;
 use core::sync::atomic::{AtomicBool, Ordering};
 
 /// Safe wrapper for static mutable bare-metal structures
-struct SyncUnsafeCell<T>(UnsafeCell<T>);
+pub(crate) struct SyncUnsafeCell<T>(UnsafeCell<T>);
 unsafe impl<T> Sync for SyncUnsafeCell<T> {}
 
 impl<T> SyncUnsafeCell<T> {
-    const fn new(value: T) -> Self {
+    pub(crate) const fn new(value: T) -> Self {
         Self(UnsafeCell::new(value))
     }
     #[inline(always)]
-    fn get(&self) -> *mut T {
+    pub(crate) fn get(&self) -> *mut T {
         self.0.get()
     }
 }
@@ -92,6 +92,15 @@ impl Tss64 {
 /// 16-byte aligned stack buffer used for IST stacks and kernel (RSP0) stacks.
 #[repr(align(16))]
 pub(crate) struct AlignedStack<const N: usize>([u8; N]);
+
+impl<const N: usize> AlignedStack<N> {
+    pub(crate) const fn new() -> Self {
+        Self([0u8; N])
+    }
+    pub(crate) fn as_ptr(&self) -> *const u8 {
+        self.0.as_ptr()
+    }
+}
 
 /// IST1 stack for Double Fault handler (8 KiB, 16-byte aligned)
 pub(crate) const IST1_STACK_SIZE: usize = 8 * 1024;
@@ -190,7 +199,7 @@ pub const USER_DS: u16 = 0x28 | 3; // 0x2B
 pub const USER_CS: u16 = 0x30 | 3; // 0x33
 
 /// Encodes a standard 8-byte GDT descriptor into a u64
-const fn encode_gdt_entry(access: u8, flags: u8) -> u64 {
+pub(crate) const fn encode_gdt_entry(access: u8, flags: u8) -> u64 {
     let limit_low: u64 = 0xFFFF;
     let granularity: u64 = ((flags << 4) | 0x0F) as u64;
     limit_low
@@ -202,7 +211,7 @@ const fn encode_gdt_entry(access: u8, flags: u8) -> u64 {
 }
 
 /// Encodes the TSS descriptor into two u64 words (16 bytes total).
-fn encode_tss_descriptor(base: u64, limit: u32) -> (u64, u64) {
+pub(crate) fn encode_tss_descriptor(base: u64, limit: u32) -> (u64, u64) {
     let base_low = base & 0xFFFF;
     let base_mid = (base >> 16) & 0xFF;
     let base_mid_high = (base >> 24) & 0xFF;

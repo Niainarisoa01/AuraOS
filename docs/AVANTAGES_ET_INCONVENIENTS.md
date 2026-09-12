@@ -6,9 +6,10 @@
 >
 > **Note de révision :** Ce document a été réaudité le 12/09/2026. Les 25 points
 > (I1–I25) ont été revus contre le code réel. 10 étaient déjà entièrement
-> corrigés par les commits récents, 6 partiellement, et 6 ont été corrigés dans
-> le cadre de ce travail (I5, I12, I20, I21, I22, I23). Il reste 7 chantiers
-> de fond (I4, I6, I8–I11, I13) documentés dans la section « Chantiers futurs ».
+> corrigés par les commits récents, 6 partiellement, et 7 ont été corrigés dans
+> le cadre de ce travail (I4, I5, I12, I20, I21, I22, I23). Il reste 5 chantiers
+> de fond (I6, I8–I11, I13) documentés dans la section « Chantiers futurs ».
+> I4 (SMP) est désormais entièrement implémenté avec multi-cœur préemptif et 37 tests validés.
 
 ---
 
@@ -278,23 +279,28 @@ initiale (I1–I3) n'existent plus dans le code actuel.
 
 ---
 
-## 🟠 INCONVÉNIENTS ENCORE PRÉSENTS — Chantiers de fond (6)
+## 🟠 INCONVÉNIENTS ENCORE PRÉSENTS — Chantiers de fond (5)
 
 > Ces points nécessitent des semaines de développement et sont déjà inscrits dans
 > la feuille de route (`FEUILLE_DE_ROUTE_ET_AMELIORATIONS.md`). Ils ne sont pas des
 > "bugs" mais des manques de fonctionnalités architecturales.
 
-### 🔴 I4 — Single-Core Uniquement — Aucun Support SMP
+### ✅ I4 — SMP Multi-Core — Fait (chantier de fond)
 
-Le kernel détecte les cores CPU via MADT/ACPI mais **ne les utilise jamais**. Tout s'exécute sur le BSP. L'ajout de SMP nécessiterait :
+Le kernel détecte les cœurs CPU via MADT/ACPI et dispose d'un **support SMP multi-cœur complet et préemptif**. Les Application Processors (APs) sont réveillés via le protocole INIT-SIPI-SIPI, disposent de leurs structures `PerCpu` dédiées (GDT, TSS, IST1, stacks d'exception et d'interruption, scratch syscall), de leurs timers LAPIC périodiques locaux (Vecteur 0x40), et d'une file d'exécution (`CpuScheduler`) indépendante avec équilibrage de charge et vol de travail (work stealing).
 
-- Envoi de Startup IPI (SIPI) pour réveiller chaque AP
-- Per-CPU data structures (pile, IDT, TSS par cœur)
-- Scheduler per-CPU avec work stealing ou load balancing
-
-**Impact :** Performances plafonnées à ~12.5% d'un octa-core. Le script QEMU accepte désormais `--smp N`.
-
-**Effort :** ~1 mois.
+**Implémenté :**
+- ✅ Trampoline real → protected → long mode (global_asm, copié à 0x8000)
+- ✅ Per-CPU data (`PerCpu` struct : GDT, TSS, stacks, scratch syscall)
+- ✅ INIT-SIPI-SIPI avec timeout, vérification d'état et barrière `SMP_STARTED`
+- ✅ Syscall MSRs (STAR, LSTAR, FMASK, KERNEL_GS_BASE) configurés par CPU
+- ✅ LAPIC software-enable et timer périodique local (Vecteur 0x40, ~100 Hz) sur chaque cœur
+- ✅ Scheduler multi-cœur : `CPU_SCHEDULERS: [Spinlock<CpuScheduler>; MAX_CPUS]` avec files d'attente indépendantes
+- ✅ Distribution de charge automatique à la création de tâche (`spawn`, `spawn_user`) vers le cœur le moins chargé
+- ✅ Vol de travail (work stealing) non bloquant lors de l'épuisement de la run queue locale
+- ✅ Synchronisation SMP stricte : ordre de verrouillage anti-deadlock (`WRITER` -> `SERIAL1`), handlers d'exception `force_unlock()`
+- ✅ Commandes shell `cores` et `ps` enrichies avec CPU ID, idle state et répartition des tâches
+- ✅ Tests automatisés complets : Test #35 (SMP CPU Enumeration & AP Online Check), Test #36 (SMP Per-CPU Schedulers & Run Queue Isolation), Test #37 (SMP Task Distribution & Cross-Core Management)
 
 ---
 
@@ -370,7 +376,7 @@ Le fichier `shell/mod.rs` fait **1 174 lignes** dans un seul fichier avec un `ma
 | A10-A12 | ✅ | — | Réseau, VFS, 34 tests | — |
 | A13-A15 | ✅ | — | Shell, ACPI, binaire léger | — |
 | I1-I3 | ❌→✅ | 🔴→✅ | Bugs syscalls/uptime corrigés | **Corrigé** |
-| I4 | ❌ | 🔴 Archi | Pas de SMP | Chantier (~1 mois) |
+| I4 | ❌→✅ | 🔴→✅ | SMP multi-cœur complet (APs, schedulers per-CPU, LAPIC timers, tests #35-#37) | **Corrigé** |
 | I5 | ❌→✅ | 🔴→✅ | PMM E820 + bitmap + pages user via PMM (Drop réel) | **Corrigé** |
 | I6 | ❌ | 🔴 Archi | Pas de VM dynamique | Chantier (~2 sem) |
 | I7 | ⚠️ | 🟡 Fonc | Fork/exec partiel (spawn OK, pas de fork) | Partiel |

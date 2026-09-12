@@ -1,19 +1,20 @@
 //! ============================================================================
-//! Kernel Multitasking & Task Context Switching (TCB & Scheduler)
+//! Kernel Multitasking & Task Context Switching (TCB & SMP Scheduler)
 //! ============================================================================
 //!
-//! Implements pure Rust cooperative multitasking with Task Control Blocks (TCB),
-//! stack allocation, round-robin scheduling, and assembly context switching.
-//!
-//! In x86_64 Long Mode System V ABI:
-//! - Callee-saved registers: r15, r14, r13, r12, rbx, rbp, rflags
-//! - Context switch saves caller registers on current stack and restores target stack.
+//! Implements pure Rust cooperative and preemptive multitasking with:
+//! - Per-CPU independent run-queues and scheduler state (`CpuScheduler`).
+//! - Task Control Blocks (TCB) and kernel/user stack allocation.
+//! - Round-robin scheduling with dynamic quantum accounting.
+//! - Assembly context switching (`switch_context`).
+//! - Multi-core load-balanced task distribution and work stealing.
+//! - Per-CPU Local APIC timer preemption.
 
+use crate::sync::Spinlock;
 use alloc::boxed::Box;
 use alloc::vec;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicUsize, Ordering};
-use crate::sync::Spinlock;
 
 pub mod ipc;
 
@@ -71,10 +72,15 @@ pub struct Task {
 
 /// Trampoline executed when a user-space task is scheduled for the first time.
 extern "C" fn user_task_trampoline() {
+    let cpu_id = crate::arch::smp::current_cpu();
+    let cpu_id = if cpu_id < crate::arch::smp::MAX_CPUS { cpu_id } else { 0 };
     let (entry, stack_top) = {
-        let sched = SCHEDULER.lock();
+        let sched = CPU_SCHEDULERS[cpu_id].lock();
         let curr = sched.current;
-        (sched.tasks[curr].user_entry, sched.tasks[curr].user_stack_top)
+        (
+            sched.tasks[curr].user_entry,
+            sched.tasks[curr].user_stack_top,
+        )
     };
     unsafe {
         crate::arch::ring3::enter_user_mode(entry, stack_top);
@@ -92,15 +98,15 @@ impl Task {
 
         let frame_ptr = (aligned_top - 72) as *mut u64;
         unsafe {
-            *frame_ptr.add(8) = 0;                                               // ABI alignment padding
-            *frame_ptr.add(7) = entry_point as *const () as usize as u64;     // RIP
-            *frame_ptr.add(6) = 0x202;                       // RFLAGS (IF=1)
-            *frame_ptr.add(5) = 0;                           // RBP
-            *frame_ptr.add(4) = 0;                           // RBX
-            *frame_ptr.add(3) = 0;                           // R12
-            *frame_ptr.add(2) = 0;                           // R13
-            *frame_ptr.add(1) = 0;                           // R14
-            *frame_ptr.add(0) = 0;                           // R15
+            *frame_ptr.add(8) = 0; // ABI alignment padding
+            *frame_ptr.add(7) = entry_point as *const () as usize as u64; // RIP
+            *frame_ptr.add(6) = 0x202; // RFLAGS (IF=1)
+            *frame_ptr.add(5) = 0; // RBP
+            *frame_ptr.add(4) = 0; // RBX
+            *frame_ptr.add(3) = 0; // R12
+            *frame_ptr.add(2) = 0; // R13
+            *frame_ptr.add(1) = 0; // R14
+            *frame_ptr.add(0) = 0; // R15
         }
 
         let initial_rsp = (aligned_top - 72) as usize;
@@ -114,16 +120,16 @@ impl Task {
             ticks: 0,
             quantum_remaining: DEFAULT_QUANTUM,
             quantum: DEFAULT_QUANTUM,
-            priority: 128, // Default middle priority
+            priority: 10,
             is_user: false,
             cr3: None,
-            kernel_stack_top: (stack_top & !0xF) as u64,
+            kernel_stack_top: 0,
             user_entry: 0,
             user_stack_top: 0,
         }
     }
 
-    /// Creates a user space task that will transition to Ring 3 upon scheduling.
+    /// Creates a new user-space (Ring 3) task.
     pub fn new_user(
         id: usize,
         name: &'static str,
@@ -137,9 +143,9 @@ impl Task {
 
         let frame_ptr = (aligned_top - 72) as *mut u64;
         unsafe {
-            *frame_ptr.add(8) = 0;                                                   // ABI alignment padding
-            *frame_ptr.add(7) = user_task_trampoline as *const () as usize as u64;   // RIP -> trampoline
-            *frame_ptr.add(6) = 0x202;                                   // RFLAGS (IF=1)
+            *frame_ptr.add(8) = 0; // ABI alignment padding
+            *frame_ptr.add(7) = user_task_trampoline as *const () as usize as u64; // RIP -> trampoline
+            *frame_ptr.add(6) = 0x202; // RFLAGS (IF=1)
             *frame_ptr.add(5) = 0;
             *frame_ptr.add(4) = 0;
             *frame_ptr.add(3) = 0;
@@ -159,27 +165,32 @@ impl Task {
             ticks: 0,
             quantum_remaining: DEFAULT_QUANTUM,
             quantum: DEFAULT_QUANTUM,
-            priority: 100, // Slightly higher priority than default worker
+            priority: 10,
             is_user: true,
             cr3: Some(cr3),
-            kernel_stack_top: (kstack_top & !0xF) as u64,
+            kernel_stack_top: kstack_top as u64,
             user_entry: entry_point,
             user_stack_top,
         }
     }
 
-    /// Creates the root task representing the kernel shell / boot thread.
+    /// Creates the root task representing the kernel shell / boot thread on the BSP.
     pub fn root(name: &'static str) -> Self {
+        Self::root_for_cpu(0, name)
+    }
+
+    /// Creates a root/idle task for a specific CPU core.
+    pub fn root_for_cpu(cpu_id: usize, name: &'static str) -> Self {
         Task {
-            id: 0,
+            id: if cpu_id == 0 { 0 } else { 1000 + cpu_id },
             name,
             rsp: 0,
-            stack: None, // Uses bootloader stack
+            stack: None, // Uses the CPU's own boot/kernel stack
             state: TaskState::Running,
             ticks: 0,
             quantum_remaining: DEFAULT_QUANTUM,
             quantum: DEFAULT_QUANTUM,
-            priority: 0, // Highest priority for shell
+            priority: 0, // Highest priority
             is_user: false,
             cr3: None,
             kernel_stack_top: 0,
@@ -201,13 +212,10 @@ pub unsafe extern "C" fn switch_context(old_rsp: *mut usize, new_rsp: usize) {
         "push r13",
         "push r14",
         "push r15",
-
         // Save current stack pointer in *old_rsp (RDI)
         "mov [rdi], rsp",
-
         // Switch to target stack pointer (RSI)
         "mov rsp, rsi",
-
         // Restore callee-saved registers from target stack
         "pop r15",
         "pop r14",
@@ -216,22 +224,30 @@ pub unsafe extern "C" fn switch_context(old_rsp: *mut usize, new_rsp: usize) {
         "pop rbx",
         "pop rbp",
         "popfq",
-
         // Return into target task instruction pointer
         "ret",
     );
 }
 
-pub struct Scheduler {
+/// Independent run-queue and scheduler state for a single CPU core.
+pub struct CpuScheduler {
+    #[allow(dead_code)]
+    pub cpu_id: usize,
     pub tasks: Vec<Task>,
     pub current: usize,
+    pub ticks: u64,
 }
 
-impl Scheduler {
-    pub const fn new() -> Self {
-        Scheduler {
+#[allow(dead_code)]
+pub type Scheduler = CpuScheduler;
+
+impl CpuScheduler {
+    pub const fn new(cpu_id: usize) -> Self {
+        CpuScheduler {
+            cpu_id,
             tasks: Vec::new(),
             current: 0,
+            ticks: 0,
         }
     }
 
@@ -259,7 +275,32 @@ impl Scheduler {
     }
 }
 
-pub static SCHEDULER: Spinlock<Scheduler> = Spinlock::new(Scheduler::new());
+/// Per-CPU array of independent schedulers (1 per core up to MAX_CPUS = 8).
+pub static CPU_SCHEDULERS: [Spinlock<CpuScheduler>; crate::arch::smp::MAX_CPUS] = [
+    Spinlock::new(CpuScheduler::new(0)),
+    Spinlock::new(CpuScheduler::new(1)),
+    Spinlock::new(CpuScheduler::new(2)),
+    Spinlock::new(CpuScheduler::new(3)),
+    Spinlock::new(CpuScheduler::new(4)),
+    Spinlock::new(CpuScheduler::new(5)),
+    Spinlock::new(CpuScheduler::new(6)),
+    Spinlock::new(CpuScheduler::new(7)),
+];
+
+/// Transparent compatibility wrapper for existing `SCHEDULER.lock()` callers.
+/// Directs calls to `CPU_SCHEDULERS[0]` (BSP scheduler).
+pub struct SchedulerCompat;
+
+impl core::ops::Deref for SchedulerCompat {
+    type Target = Spinlock<CpuScheduler>;
+    #[inline]
+    fn deref(&self) -> &Self::Target {
+        &CPU_SCHEDULERS[0]
+    }
+}
+
+pub static SCHEDULER: SchedulerCompat = SchedulerCompat;
+
 static NEXT_TASK_ID: AtomicUsize = AtomicUsize::new(1);
 pub static SENTINEL_HEARTBEATS: AtomicUsize = AtomicUsize::new(0);
 
@@ -269,61 +310,143 @@ pub extern "C" fn sentinel_task_entry() {
         let count = SENTINEL_HEARTBEATS.fetch_add(1, Ordering::SeqCst) + 1;
         crate::serial_println!("[AuraOS Sentinel] Heartbeat #{} - Kernel healthy", count);
 
-        // Sleep for ~2 seconds (approx. 36 PIT ticks)
+        // Sleep for ~2 seconds (approx. 200 PIT ticks at 100Hz)
         sleep_ms(2000);
     }
 }
 
 /// Demo background worker task: runs for 5 steps with intervals, then terminates cleanly.
 pub extern "C" fn demo_worker_entry() {
+    let cpu_id = crate::arch::smp::current_cpu();
+    let cpu_id = if cpu_id < crate::arch::smp::MAX_CPUS { cpu_id } else { 0 };
     let my_id = {
-        let sched = SCHEDULER.lock();
+        let sched = CPU_SCHEDULERS[cpu_id].lock();
         sched.tasks[sched.current].id
     };
-    crate::serial_println!("[Worker #{}] Started background execution.", my_id);
-    crate::println!("[Worker #{}] Started background execution.", my_id);
+    crate::serial_println!("[Worker #{}] Started background execution on CPU #{}.", my_id, cpu_id);
+    crate::println!("[Worker #{}] Started background execution on CPU #{}.", my_id, cpu_id);
     for i in 1..=5 {
-        crate::serial_println!("[Worker #{}] Iteration {}/5 — performing background work...", my_id, i);
+        crate::serial_println!(
+            "[Worker #{}] Iteration {}/5 on CPU #{} — performing work...",
+            my_id,
+            i,
+            crate::arch::smp::current_cpu()
+        );
         sleep_ms(600);
     }
-    crate::serial_println!("[Worker #{}] Completed all work. Terminating cleanly.", my_id);
-    crate::println!("[Worker #{}] Completed all work. Terminating cleanly.", my_id);
+    let fin_cpu = crate::arch::smp::current_cpu();
+    crate::serial_println!(
+        "[Worker #{}] Completed all work on CPU #{}. Terminating cleanly.",
+        my_id,
+        fin_cpu
+    );
+    crate::println!(
+        "[Worker #{}] Completed all work on CPU #{}. Terminating cleanly.",
+        my_id,
+        fin_cpu
+    );
     {
-        let mut sched = SCHEDULER.lock();
+        let cpu = if fin_cpu < crate::arch::smp::MAX_CPUS { fin_cpu } else { 0 };
+        let mut sched = CPU_SCHEDULERS[cpu].lock();
         let curr = sched.current;
         sched.tasks[curr].state = TaskState::Dead;
     }
-    loop {
-        yield_now();
-    }
+    yield_now();
 }
 
-/// Initializes multitasking and registers the root shell task and sentinel task.
+/// Initializes multitasking on the BSP and registers the root shell task and sentinel task.
 pub fn init() {
-    let mut sched = SCHEDULER.lock();
-    // Task 0: Root shell thread
+    let mut sched = CPU_SCHEDULERS[0].lock();
+    // Task 0: Root shell thread on BSP
     sched.tasks.push(Task::root("kernel-shell"));
 
     // Task 1: Sentinel background worker
     let tid = NEXT_TASK_ID.fetch_add(1, Ordering::SeqCst);
-    sched.tasks.push(Task::new(tid, "sentinel-worker", sentinel_task_entry));
+    sched
+        .tasks
+        .push(Task::new(tid, "sentinel-worker", sentinel_task_entry));
 
-    crate::serial_println!("[Multitasking] Scheduler initialized with {} tasks", sched.tasks.len());
+    crate::serial_println!(
+        "[Multitasking] BSP Scheduler initialized with {} tasks",
+        sched.tasks.len()
+    );
 }
 
-/// Updates hardware TSS.rsp0 and CR3 during a context switch.
+/// Initializes the scheduler on an Application Processor (AP).
+/// Called on the AP before entering its idle scheduling loop.
+pub fn init_ap(cpu_id: usize) {
+    if cpu_id >= crate::arch::smp::MAX_CPUS {
+        return;
+    }
+    let mut sched = CPU_SCHEDULERS[cpu_id].lock();
+    if sched.tasks.is_empty() {
+        let name = match cpu_id {
+            1 => "idle-cpu-1",
+            2 => "idle-cpu-2",
+            3 => "idle-cpu-3",
+            4 => "idle-cpu-4",
+            5 => "idle-cpu-5",
+            6 => "idle-cpu-6",
+            7 => "idle-cpu-7",
+            _ => "idle-cpu-ap",
+        };
+        sched.tasks.push(Task::root_for_cpu(cpu_id, name));
+        sched.current = 0;
+    }
+    crate::serial_println!("[SMP] CPU #{} scheduler initialized (idle task ready)", cpu_id);
+}
+
+/// Main idle scheduling loop for an Application Processor.
+/// The AP runs this function continuously, switching to ready tasks
+/// or waiting for work in low-power HLT mode.
+pub fn ap_idle_loop(cpu_id: usize) -> ! {
+    crate::serial_println!("[SMP] CPU #{} entered scheduler loop", cpu_id);
+    loop {
+        let (has_ready, count) = {
+            let sched = CPU_SCHEDULERS[cpu_id].lock();
+            let has = sched.tasks.iter().enumerate().any(|(i, t)| {
+                i != sched.current && t.state == TaskState::Ready
+            });
+            (has, sched.tasks.len())
+        };
+
+        if has_ready {
+            yield_now();
+        } else if count > 1 {
+            try_steal_task(cpu_id);
+            unsafe {
+                core::arch::asm!("sti; hlt", options(nomem, nostack));
+            }
+        } else {
+            // Only idle task on this core: sleep until interrupted by timer or IPI
+            unsafe {
+                core::arch::asm!("sti; hlt", options(nomem, nostack));
+            }
+        }
+    }
+}
+
+/// Updates hardware TSS.rsp0, syscall scratch, and CR3 during a context switch for the current CPU.
 #[inline]
 pub fn on_context_switch(is_user: bool, kstack_top: u64, cr3_opt: Option<u64>) {
+    let cpu_id = crate::arch::smp::current_cpu();
+    let cpu_id = if cpu_id < crate::arch::smp::MAX_CPUS { cpu_id } else { 0 };
     if is_user {
         crate::arch::gdt::set_tss_rsp0(kstack_top);
         crate::arch::syscall::set_kernel_rsp(kstack_top);
+        unsafe {
+            let per_cpu = &mut (*crate::arch::smp::PER_CPU.get())[cpu_id];
+            per_cpu.tss.rsp0 = kstack_top;
+            per_cpu.kernel_rsp_scratch = kstack_top;
+        }
         if let Some(cr3) = cr3_opt {
             unsafe {
                 crate::memory::paging::write_cr3(crate::memory::paging::PhysAddr(cr3));
             }
         }
     } else {
-        let kcr3 = crate::memory::user_space::KERNEL_CR3.load(core::sync::atomic::Ordering::Relaxed);
+        let kcr3 =
+            crate::memory::user_space::KERNEL_CR3.load(core::sync::atomic::Ordering::Relaxed);
         if kcr3 != 0 {
             unsafe {
                 crate::memory::paging::write_cr3(crate::memory::paging::PhysAddr(kcr3));
@@ -332,89 +455,191 @@ pub fn on_context_switch(is_user: bool, kstack_top: u64, cr3_opt: Option<u64>) {
     }
 }
 
-/// Spawns a new kernel thread.
-#[allow(dead_code)]
+/// Selects the best CPU core to assign a new task to (least loaded online CPU).
+pub fn choose_target_cpu() -> usize {
+    let online = crate::arch::smp::cpu_count();
+    if online <= 1 {
+        return 0;
+    }
+    let num_cpus = online.min(crate::arch::smp::MAX_CPUS);
+    let mut best_cpu = 0;
+    let mut min_load = usize::MAX;
+
+    for cpu in 0..num_cpus {
+        let sched = CPU_SCHEDULERS[cpu].lock();
+        let load = sched.tasks.len();
+        if load < min_load {
+            min_load = load;
+            best_cpu = cpu;
+        }
+    }
+    best_cpu
+}
+
+/// Spawns a new kernel thread and attaches it to the least-loaded CPU's run queue.
 pub fn spawn(name: &'static str, entry_point: extern "C" fn()) -> usize {
     let tid = NEXT_TASK_ID.fetch_add(1, Ordering::SeqCst);
     let task = Task::new(tid, name, entry_point);
-    let mut sched = SCHEDULER.lock();
+    let target_cpu = choose_target_cpu();
+    let mut sched = CPU_SCHEDULERS[target_cpu].lock();
     sched.tasks.push(task);
+    crate::serial_println!("[Multitasking] Spawned task '{}' (TID {}) on CPU #{}", name, tid, target_cpu);
     tid
 }
 
 /// Spawns a new user space task with its own address space and entry point.
 #[allow(dead_code)]
-pub fn spawn_user(
-    name: &'static str,
-    entry_point: u64,
-    user_stack_top: u64,
-    cr3: u64,
-) -> usize {
+pub fn spawn_user(name: &'static str, entry_point: u64, user_stack_top: u64, cr3: u64) -> usize {
     let tid = NEXT_TASK_ID.fetch_add(1, Ordering::SeqCst);
     let task = Task::new_user(tid, name, entry_point, user_stack_top, cr3);
-    let mut sched = SCHEDULER.lock();
+    let target_cpu = choose_target_cpu();
+    let mut sched = CPU_SCHEDULERS[target_cpu].lock();
     sched.tasks.push(task);
+    crate::serial_println!("[Multitasking] Spawned user task '{}' (TID {}) on CPU #{}", name, tid, target_cpu);
     tid
 }
 
-/// Terminates a task by setting its state to Dead. Task 0 (kernel shell) cannot be killed.
-pub fn kill_task(id: usize) -> bool {
-    if id == 0 {
+/// Attempts to steal a ready task from another CPU.
+/// To avoid deadlocks, locks are acquired one at a time and never held nested.
+pub fn try_steal_task(my_cpu: usize) -> bool {
+    let online = crate::arch::smp::cpu_count();
+    if online <= 1 {
         return false;
     }
-    let killed = {
-        let mut sched = SCHEDULER.lock();
-        let mut found = false;
+    let num_cpus = online.min(crate::arch::smp::MAX_CPUS);
+
+    for offset in 1..num_cpus {
+        let victim_cpu = (my_cpu + offset) % num_cpus;
+        let mut stolen_task = None;
+
+        // 1. Inspect victim queue with victim lock
+        {
+            let mut victim_sched = CPU_SCHEDULERS[victim_cpu].lock();
+            if victim_sched.tasks.len() > 2 {
+                let curr = victim_sched.current;
+                let mut steal_idx = None;
+                for (i, t) in victim_sched.tasks.iter().enumerate() {
+                    // Do not steal root/idle task (idx 0), current running task, or user tasks
+                    if i != 0 && i != curr && t.state == TaskState::Ready && !t.is_user {
+                        steal_idx = Some(i);
+                        break;
+                    }
+                }
+                if let Some(idx) = steal_idx {
+                    let task = victim_sched.tasks.remove(idx);
+                    if victim_sched.current > idx {
+                        victim_sched.current -= 1;
+                    }
+                    stolen_task = Some(task);
+                }
+            }
+        } // Victim lock released here!
+
+        // 2. Insert into local queue with local lock (NO nested locks)
+        if let Some(mut task) = stolen_task {
+            task.quantum_remaining = task.quantum;
+            let mut my_sched = CPU_SCHEDULERS[my_cpu].lock();
+            crate::serial_println!(
+                "[SMP] Work stealing: CPU #{} stole task '{}' (TID {}) from CPU #{}",
+                my_cpu,
+                task.name,
+                task.id,
+                victim_cpu
+            );
+            my_sched.tasks.push(task);
+            return true;
+        }
+    }
+    false
+}
+
+/// Marks a task for termination by TID across any CPU run-queue and reaps it.
+pub fn kill_task(tid: usize) -> bool {
+    let online = crate::arch::smp::cpu_count();
+    let num_cpus = online.max(1).min(crate::arch::smp::MAX_CPUS);
+    let mut found_cpu = None;
+
+    for cpu in 0..num_cpus {
+        let mut sched = CPU_SCHEDULERS[cpu].lock();
         for task in sched.tasks.iter_mut() {
-            if task.id == id && task.state != TaskState::Dead {
+            if task.id == tid {
                 task.state = TaskState::Dead;
-                found = true;
+                found_cpu = Some(cpu);
                 break;
             }
         }
-        found
-    };
-    if killed {
-        reap_dead_tasks();
+        if found_cpu.is_some() {
+            break;
+        }
     }
-    killed
+
+    if let Some(cpu) = found_cpu {
+        reap_dead_tasks_on_cpu(cpu);
+        true
+    } else {
+        false
+    }
 }
 
-/// Reaps dead tasks by removing them from the scheduler and freeing their stacks.
-/// Task 0 (kernel shell) and the currently running task are never reaped.
-/// Returns the number of tasks reaped.
+/// Reaps dead tasks across all CPU run queues.
 #[allow(dead_code)]
 pub fn reap_dead_tasks() -> usize {
-    let mut sched = SCHEDULER.lock();
-    let curr = sched.current;
-    let mut reaped = 0;
-    let mut i = sched.tasks.len();
+    let online = crate::arch::smp::cpu_count();
+    let num_cpus = online.max(1).min(crate::arch::smp::MAX_CPUS);
+    let mut total_reaped = 0;
 
-    // Iterate backwards to avoid index invalidation issues
-    while i > 0 {
-        i -= 1;
-        if i == 0 || i == curr {
-            continue; // Never reap task 0 or the currently running task
+    for cpu in 0..num_cpus {
+        total_reaped += reap_dead_tasks_on_cpu(cpu);
+    }
+    total_reaped
+}
+
+/// Reaps dead tasks on a specific CPU run queue.
+pub fn reap_dead_tasks_on_cpu(cpu_id: usize) -> usize {
+    if cpu_id >= crate::arch::smp::MAX_CPUS {
+        return 0;
+    }
+    let mut sched = CPU_SCHEDULERS[cpu_id].lock();
+    let mut reaped = 0;
+    let mut i = 0;
+
+    while i < sched.tasks.len() {
+        if i == sched.current {
+            i += 1;
+            continue;
         }
+
         if sched.tasks[i].state == TaskState::Dead {
-            // Drop the task (its Box<[u8]> stack will be freed)
-            sched.tasks.remove(i);
+            let dead_task = sched.tasks.remove(i);
             reaped += 1;
-            // Adjust current index if it was after the removed element
-            if curr > i {
+            crate::serial_println!("[Multitasking] Reaped dead task '{}' (TID {}) on CPU #{}", dead_task.name, dead_task.id, cpu_id);
+            if i < sched.current {
                 sched.current -= 1;
             }
+        } else {
+            i += 1;
         }
     }
 
     if reaped > 0 {
-        crate::klog!(Info, "scheduler", "Reaped {} dead task(s), {} remaining", reaped, sched.tasks.len());
+        crate::klog!(
+            Info,
+            "scheduler",
+            "CPU #{}: Reaped {} dead task(s), {} remaining",
+            cpu_id,
+            reaped,
+            sched.tasks.len()
+        );
     }
     reaped
 }
 
-/// Cooperatively yields execution to the next ready task.
+/// Cooperatively yields the remaining CPU timeslice to the next ready task.
 pub fn yield_now() {
+    let cpu_id = crate::arch::smp::current_cpu();
+    let cpu_id = if cpu_id < crate::arch::smp::MAX_CPUS { cpu_id } else { 0 };
+
+    // Atomically check IF bit in RFLAGS and disable interrupts
     let interrupts_were_enabled = {
         let rflags: u64;
         unsafe {
@@ -423,8 +648,21 @@ pub fn yield_now() {
         (rflags & (1 << 9)) != 0
     };
 
+    // If only the current/idle task is ready on this CPU and we have tasks, attempt work stealing
+    {
+        let sched = CPU_SCHEDULERS[cpu_id].lock();
+        let has_other_ready = sched.tasks.iter().enumerate().any(|(i, t)| {
+            i != sched.current && t.state == TaskState::Ready
+        });
+        let should_steal = !has_other_ready && sched.tasks.len() > 1;
+        drop(sched);
+        if should_steal {
+            try_steal_task(cpu_id);
+        }
+    }
+
     let result = {
-        let mut sched = SCHEDULER.lock();
+        let mut sched = CPU_SCHEDULERS[cpu_id].lock();
         if sched.tasks.len() < 2 {
             None
         } else {
@@ -468,62 +706,60 @@ pub fn yield_now() {
     }
 }
 
-/// Puts the calling task to sleep for a specified number of timer ticks (PIT IRQ 0).
+/// Puts the calling task to sleep for a specified number of timer ticks.
 pub fn sleep_ticks(ticks: u64) {
     if ticks == 0 {
         yield_now();
         return;
     }
 
-    let wake_tick = crate::arch::idt::ticks().saturating_add(ticks);
+    let cpu_id = crate::arch::smp::current_cpu();
+    let cpu_id = if cpu_id < crate::arch::smp::MAX_CPUS { cpu_id } else { 0 };
+
+    let current_ticks = crate::arch::idt::ticks();
+    let target_tick = current_ticks + ticks;
 
     {
-        let mut sched = SCHEDULER.lock();
+        let mut sched = CPU_SCHEDULERS[cpu_id].lock();
         let curr = sched.current;
-        sched.tasks[curr].state = TaskState::Sleeping(wake_tick);
+        sched.tasks[curr].state = TaskState::Sleeping(target_tick);
     }
 
-    // Loop until we are woken up (timer_tick will set state back to Ready)
     loop {
         yield_now();
-        let is_woken = {
-            let sched = SCHEDULER.lock();
+
+        let still_sleeping = {
+            let sched = CPU_SCHEDULERS[cpu_id].lock();
             let curr = sched.current;
-            sched.tasks[curr].state != TaskState::Sleeping(wake_tick)
-                || crate::arch::idt::ticks() >= wake_tick
+            matches!(sched.tasks[curr].state, TaskState::Sleeping(t) if crate::arch::idt::ticks() < t)
         };
-        if is_woken {
-            let mut sched = SCHEDULER.lock();
-            let curr = sched.current;
-            sched.tasks[curr].state = TaskState::Running;
+
+        if !still_sleeping {
             break;
         }
         // If still sleeping and no other task is ready, sleep CPU until next interrupt
-        unsafe { core::arch::asm!("sti; hlt", options(nomem, nostack)); }
+        unsafe {
+            core::arch::asm!("sti; hlt", options(nomem, nostack));
+        }
     }
 }
 
 /// Puts the calling task to sleep for approximately the requested number of milliseconds.
 pub fn sleep_ms(ms: u64) {
     // PIT tick rate is 100 Hz (10 ms per tick)
-    let ticks = if ms == 0 {
-        0
-    } else {
-        ((ms + 9) / 10).max(1)
-    };
+    let ticks = if ms == 0 { 0 } else { ((ms + 9) / 10).max(1) };
     sleep_ticks(ticks);
 }
 
-/// Called on every hardware timer PIT tick (IRQ0) to update CPU accounting,
-/// wake sleeping tasks, and trigger preemption when quantum expires.
+/// Called on every hardware timer PIT tick (IRQ0 on BSP) to update global system accounting.
 pub fn timer_tick() {
     let current_ticks = crate::arch::idt::ticks();
-    let mut sched = SCHEDULER.lock();
-    if !sched.tasks.is_empty() {
-        let curr = sched.current;
-        sched.tasks[curr].ticks += 1;
+    let online = crate::arch::smp::cpu_count();
+    let num_cpus = online.max(1).min(crate::arch::smp::MAX_CPUS);
 
-        // Wake up any task whose sleep target tick has arrived
+    for cpu_id in 0..num_cpus {
+        let mut sched = CPU_SCHEDULERS[cpu_id].lock();
+        // Wake up any task on this CPU whose sleep target tick has arrived
         for task in sched.tasks.iter_mut() {
             if let TaskState::Sleeping(wake_tick) = task.state {
                 if current_ticks >= wake_tick {
@@ -531,32 +767,76 @@ pub fn timer_tick() {
                 }
             }
         }
+    }
 
-        // Preemptive quantum accounting
-        if sched.tasks[curr].quantum_remaining > 0 {
-            sched.tasks[curr].quantum_remaining -= 1;
+    // On CPU 0, also update its quantum and ticks
+    let mut sched0 = CPU_SCHEDULERS[0].lock();
+    if !sched0.tasks.is_empty() {
+        let curr = sched0.current;
+        if curr < sched0.tasks.len() {
+            sched0.tasks[curr].ticks += 1;
+            if sched0.tasks[curr].quantum_remaining > 0 {
+                sched0.tasks[curr].quantum_remaining -= 1;
+            }
         }
     }
 }
 
-/// Called from the timer IRQ handler after timer_tick().
-/// If the current task's quantum has expired, forces a context switch.
-/// Returns true if a preemption occurred.
-pub fn preempt_schedule() -> bool {
-    // Periodically reap dead tasks (about once every 250 ms at 100 Hz).
-    // This frees stacks of tasks that self-terminated via `SYS_EXIT` or a
-    // natural worker exit, which are otherwise never cleaned up.
-    if crate::arch::idt::ticks().is_multiple_of(25) {
-        reap_dead_tasks();
+/// Called from Local APIC timer interrupt handler on the CURRENT CPU core.
+pub fn smp_timer_tick() {
+    let cpu_id = crate::arch::smp::current_cpu();
+    let cpu_id = if cpu_id < crate::arch::smp::MAX_CPUS { cpu_id } else { 0 };
+    let current_ticks = crate::arch::idt::ticks();
+
+    {
+        let mut sched = CPU_SCHEDULERS[cpu_id].lock();
+        sched.ticks += 1;
+        if !sched.tasks.is_empty() {
+            let curr = sched.current;
+            if curr < sched.tasks.len() {
+                sched.tasks[curr].ticks += 1;
+                if sched.tasks[curr].quantum_remaining > 0 {
+                    sched.tasks[curr].quantum_remaining -= 1;
+                }
+            }
+
+            // Wake up any task whose sleep target tick has arrived
+            for task in sched.tasks.iter_mut() {
+                if let TaskState::Sleeping(wake_tick) = task.state {
+                    if current_ticks >= wake_tick {
+                        task.state = TaskState::Ready;
+                    }
+                }
+            }
+        }
     }
 
+    // Periodically reap dead tasks on this CPU
+    if current_ticks.is_multiple_of(25) {
+        reap_dead_tasks_on_cpu(cpu_id);
+    }
+
+    // Attempt preemptive scheduling on this CPU
+    preempt_schedule_on_cpu(cpu_id);
+}
+
+/// Preemptively context switches if the current task's quantum has expired on CPU 0.
+pub fn preempt_schedule() -> bool {
+    preempt_schedule_on_cpu(0)
+}
+
+/// Preemptive scheduler for a specific CPU core.
+pub fn preempt_schedule_on_cpu(cpu_id: usize) -> bool {
     let result = {
-        let mut sched = SCHEDULER.lock();
+        let mut sched = CPU_SCHEDULERS[cpu_id].lock();
         if sched.tasks.is_empty() || sched.tasks.len() < 2 {
             return false;
         }
 
         let curr_idx = sched.current;
+        if curr_idx >= sched.tasks.len() {
+            return false;
+        }
 
         // Only preempt if quantum is exhausted
         if sched.tasks[curr_idx].quantum_remaining > 0 {
@@ -576,7 +856,6 @@ pub fn preempt_schedule() -> bool {
                 sched.tasks[curr_idx].state = TaskState::Ready;
             }
             sched.tasks[next_idx].state = TaskState::Running;
-            // Reset next task's quantum too
             let nq = sched.tasks[next_idx].quantum;
             sched.tasks[next_idx].quantum_remaining = nq;
             sched.current = next_idx;
@@ -601,4 +880,15 @@ pub fn preempt_schedule() -> bool {
     } else {
         false
     }
+}
+
+/// Returns the total number of tasks currently allocated across all online CPUs.
+pub fn total_task_count() -> usize {
+    let online = crate::arch::smp::cpu_count();
+    let num_cpus = online.max(1).min(crate::arch::smp::MAX_CPUS);
+    let mut total = 0;
+    for c in 0..num_cpus {
+        total += CPU_SCHEDULERS[c].lock().tasks.len();
+    }
+    total
 }

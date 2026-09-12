@@ -116,7 +116,15 @@ pub extern "C" fn _start(boot_info: &'static bootloader::bootinfo::BootInfo) -> 
     arch::acpi::init();
     arch::apic::init();
 
-    // Step 7c: Activate Bochs BGA high-resolution framebuffer if present.
+    // Step 7c: Initialize Kernel Multitasking & Scheduler (BSP run-queue and TCBs)
+    task::init();
+    println!("[OK] Tasks     : Per-CPU Round-Robin scheduler initialized (TCBs ready).");
+    klog!(Info, "scheduler", "Multitasking initialized.");
+
+    // Step 7d: Initialize SMP — wake Application Processors via INIT-SIPI-SIPI
+    arch::smp::init();
+
+    // Step 7e: Activate Bochs BGA high-resolution framebuffer if present.
     // The desktop GUI stays available afterwards via the `gui` shell command,
     // or launches automatically once the console is made interactive below.
     let bga_active = {
@@ -142,12 +150,7 @@ pub extern "C" fn _start(boot_info: &'static bootloader::bootinfo::BootInfo) -> 
         }
     }
 
-    // Step 8: Initialize Kernel Multitasking & Scheduler
-    task::init();
-    println!("[OK] Tasks     : Round-Robin scheduler initialized (TCBs ready).");
-    klog!(Info, "scheduler", "Multitasking initialized.");
-
-    // Step 9: Initialize Virtual File System & RAMFS
+    // Step 8: Initialize Virtual File System & RAMFS
     fs::init();
     println!("[OK] VFS       : Root RAM disk mounted at '/' (hierarchy ready).");
     klog!(Info, "vfs", "VFS & RAMFS mounted.");
@@ -169,10 +172,18 @@ pub extern "C" fn _start(boot_info: &'static bootloader::bootinfo::BootInfo) -> 
         println!("[--] Network   : No e1000 NIC detected (loopback mode).");
     }
 
+    // Step 10c: Start Local APIC periodic timer on BSP (Vector 0x40, ~100 Hz countdown)
+    arch::apic::init_timer(arch::apic::LAPIC_TIMER_VECTOR, 1_000_000);
+
+    // Step 10d: Release all Application Processors to begin timer preemption and scheduling
+    arch::smp::start_aps();
+    println!("[OK] SMP       : Multi-core scheduling active across all online CPUs.");
+
     // Step 11: Execute Kernel Automated Subsystem Diagnostics
     println!();
     println!("[DIAG] Running AuraOS automated self-test verification...");
     let test_results = tests::run_all_tests();
+    serial_println!("[DEBUG] Automated self-tests finished (total: {}).", test_results.len());
     let mut all_passed = true;
     for res in &test_results {
         if res.passed {

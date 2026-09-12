@@ -226,19 +226,28 @@ impl Shell {
             "cores" | "smp" => {
                 let acpi = crate::arch::acpi::ACPI_DATA.lock();
                 let lapic = crate::arch::apic::LOCAL_APIC.lock();
+                let online_cpus = crate::arch::smp::cpu_count();
                 crate::println!("--- AURAOS MULTIPROCESSOR (SMP) & APIC REPORT ---");
+                crate::println!("  Online CPUs    : {} / {} (MADT)", online_cpus, acpi.cores.len());
                 crate::println!("  Local APIC Base: {:#x}", lapic.base_addr);
                 crate::println!("  Bootstrap CPU  : APIC ID {}", lapic.apic_id);
                 crate::println!("  LAPIC Version  : {:#x}", lapic.version);
                 crate::println!("  Software Enable: {}", if lapic.is_enabled { "Yes (SVR active)" } else { "No" });
                 crate::println!("  Discovered Cores (MADT): {}", acpi.cores.len());
+                let per_cpu = unsafe { &*crate::arch::smp::PER_CPU.get() };
                 for (idx, core) in acpi.cores.iter().enumerate() {
+                    let smp_online = if idx < crate::arch::smp::MAX_CPUS {
+                        per_cpu[idx].online.load(core::sync::atomic::Ordering::Relaxed)
+                    } else {
+                        false
+                    };
                     crate::println!(
-                        "    [Core {}] ACPI Processor ID: {}, APIC ID: {}, Status: {}",
+                        "    [Core {}] ACPI ProcID: {}, APIC ID: {}, MADT: {}, SMP: {}",
                         idx,
                         core.processor_id,
                         core.apic_id,
-                        if core.is_enabled { "Enabled / Online" } else { "Disabled" }
+                        if core.is_enabled { "Enabled" } else { "Disabled" },
+                        if smp_online { "ONLINE" } else { "offline" }
                     );
                 }
                 if !acpi.io_apics.is_empty() {
@@ -281,23 +290,27 @@ impl Shell {
             }
 
             "tasks" | "ps" => {
-                let sched = crate::task::SCHEDULER.lock();
+                let online = crate::arch::smp::cpu_count();
+                let num_cpus = online.max(1).min(crate::arch::smp::MAX_CPUS);
                 let count = crate::task::SENTINEL_HEARTBEATS.load(core::sync::atomic::Ordering::SeqCst);
-                crate::println!("--- AURAOS KERNEL TASK SCHEDULER ---");
-                crate::println!("PID  NAME               RING   STATE           PRIO QUANTUM    TICKS      RSP");
-                for task in &sched.tasks {
-                    let state_str = match task.state {
-                        crate::task::TaskState::Ready => alloc::format!("READY"),
-                        crate::task::TaskState::Running => alloc::format!("RUNNING"),
-                        crate::task::TaskState::Sleeping(w) => alloc::format!("SLEEP({})", w),
-                        crate::task::TaskState::Dead => alloc::format!("DEAD"),
-                    };
-                    let ring_str = if task.is_user { "RING 3" } else { "RING 0" };
-                    crate::println!("{:<4} {:<18} {:<6} {:<15} {:<4} {}/{:<6} {:<10} {:#x}",
-                        task.id, task.name, ring_str, state_str, task.priority, task.quantum_remaining, task.quantum, task.ticks, task.rsp);
+                crate::println!("--- AURAOS KERNEL TASK SCHEDULER (SMP: {} CPU(s) online) ---", online);
+                crate::println!("CPU  PID  NAME               RING   STATE           PRIO QUANTUM    TICKS      RSP");
+                for cpu_id in 0..num_cpus {
+                    let sched = crate::task::CPU_SCHEDULERS[cpu_id].lock();
+                    for task in &sched.tasks {
+                        let state_str = match task.state {
+                            crate::task::TaskState::Ready => alloc::format!("READY"),
+                            crate::task::TaskState::Running => alloc::format!("RUNNING"),
+                            crate::task::TaskState::Sleeping(w) => alloc::format!("SLEEP({})", w),
+                            crate::task::TaskState::Dead => alloc::format!("DEAD"),
+                        };
+                        let ring_str = if task.is_user { "RING 3" } else { "RING 0" };
+                        crate::println!("{:<4} {:<4} {:<18} {:<6} {:<15} {:<4} {}/{:<6} {:<10} {:#x}",
+                            cpu_id, task.id, task.name, ring_str, state_str, task.priority, task.quantum_remaining, task.quantum, task.ticks, task.rsp);
+                    }
                 }
                 crate::println!("Sentinel Heartbeats sent: {}", count);
-                crate::println!("-----------------------------------");
+                crate::println!("------------------------------------------------------------");
             }
 
             "ipc" => {

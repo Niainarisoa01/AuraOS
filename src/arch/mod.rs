@@ -16,3 +16,4 @@ pub mod ring3;
 pub mod acpi;
 pub mod power;
 pub mod apic;
+pub mod smp;

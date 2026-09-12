@@ -173,13 +173,16 @@ extern "C" fn syscall_dispatch(
 
     SYSCALL_COUNT.fetch_add(1, Ordering::Relaxed);
 
+    let cpu_id = crate::arch::smp::current_cpu();
+    let cpu_id = if cpu_id < crate::arch::smp::MAX_CPUS { cpu_id } else { 0 };
+
     match syscall_nr {
         SYS_EXIT => {
             // Terminate current task
             crate::klog!(Info, "syscall", "exit({})", arg1);
             crate::println!("[SYSCALL] Process PID exited with status {}", arg1);
             {
-                let mut sched = crate::task::SCHEDULER.lock();
+                let mut sched = crate::task::CPU_SCHEDULERS[cpu_id].lock();
                 let curr = sched.current;
                 sched.tasks[curr].state = crate::task::TaskState::Dead;
             }
@@ -188,12 +191,13 @@ extern "C" fn syscall_dispatch(
         }
         SYS_WRITE => {
             // write(fd, buf_ptr, len) — fd=1 (stdout), fd=2 (stderr)
+            // Lock order: WRITER first, then SERIAL1 (matches vga::_print to prevent deadlocks)
             if arg1 == 1 || arg1 == 2 {
                 let ptr = arg2 as *const u8;
                 let len = arg3 as usize;
                 if !ptr.is_null() && len <= 4096 {
-                    let mut serial = crate::drivers::serial::SERIAL1.lock();
                     let mut vga = crate::drivers::vga::WRITER.lock();
+                    let mut serial = crate::drivers::serial::SERIAL1.lock();
                     for i in 0..len {
                         let byte = unsafe { core::ptr::read_volatile(ptr.add(i)) };
                         if byte == 0 { break; }
@@ -210,7 +214,7 @@ extern "C" fn syscall_dispatch(
             }
         }
         SYS_GETPID => {
-            let sched = crate::task::SCHEDULER.lock();
+            let sched = crate::task::CPU_SCHEDULERS[cpu_id].lock();
             sched.tasks[sched.current].id as u64
         }
         SYS_YIELD => {
@@ -233,7 +237,7 @@ extern "C" fn syscall_dispatch(
             let msg_type = arg2 as u32;
             let len = core::cmp::min(arg4 as usize, crate::task::ipc::IPC_PAYLOAD_MAX);
             let my_pid = {
-                let sched = crate::task::SCHEDULER.lock();
+                let sched = crate::task::CPU_SCHEDULERS[cpu_id].lock();
                 sched.tasks[sched.current].id
             };
 
@@ -251,7 +255,7 @@ extern "C" fn syscall_dispatch(
         }
         SYS_RECV => {
             let my_pid = {
-                let sched = crate::task::SCHEDULER.lock();
+                let sched = crate::task::CPU_SCHEDULERS[cpu_id].lock();
                 sched.tasks[sched.current].id
             };
             if let Some(msg) = crate::task::ipc::receive_message(my_pid) {
@@ -273,30 +277,30 @@ extern "C" fn syscall_dispatch(
     }
 }
 
-/// Initialize the syscall/sysret mechanism by configuring x86_64 MSRs.
-pub fn init() {
+/// Configures the syscall/sysret MSRs for the CURRENT CPU.
+/// This is the low-level primitive called by both the BSP's `init()` and each
+/// AP's startup path. It does not print boot messages.
+pub fn init_on_cpu() {
     unsafe {
-        // Step 1: Enable System Call Extensions in EFER MSR
+        // Enable System Call Extensions in EFER MSR
         let efer = rdmsr(MSR_EFER);
         wrmsr(MSR_EFER, efer | EFER_SCE);
 
-        // Step 2: Configure STAR — segment selectors
-        // STAR[47:32] = kernel CS (0x08), kernel SS is CS+8 = 0x10
-        // STAR[63:48] = user CS base. sysret uses this+16 for CS and this+8 for SS.
-        //   User Data selector = 0x20, User Code = 0x28
-        //   So base = 0x20 - 8 = 0x18? No.
-        //   sysret 64-bit: CS = STAR[63:48]+16, SS = STAR[63:48]+8
-        //   We want CS=0x30|3=0x33, SS=0x28|3=0x2B
-        //   So STAR[63:48] = 0x20 (0x20+8=0x28, 0x20+16=0x30, RPL=3 added by CPU)
+        // Configure STAR — segment selectors
         let star = (0x08u64 << 32) | (0x20u64 << 48);
         wrmsr(MSR_STAR, star);
 
-        // Step 3: Set LSTAR — syscall entry point address
+        // Set LSTAR — syscall entry point address
         wrmsr(MSR_LSTAR, syscall_entry as *const () as u64);
 
-        // Step 4: Set FMASK — mask IF on syscall entry (disable interrupts)
+        // Set FMASK — mask IF on syscall entry (disable interrupts)
         wrmsr(MSR_FMASK, FMASK_VALUE);
     }
+}
+
+/// Initialize the syscall/sysret mechanism by configuring x86_64 MSRs.
+pub fn init() {
+    init_on_cpu();
 
     SYSCALL_CONFIGURED.store(true, Ordering::SeqCst);
 

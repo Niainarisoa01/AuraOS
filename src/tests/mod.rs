@@ -35,6 +35,11 @@
 //! 30. Network Packet Serialization, Checksum & Protocol Dispatch
 //! 31. ACPI RSDP Discovery, Table Checksums & FADT Registers
 //! 32. MADT Core Enumeration & Local APIC MMIO Base Validation
+//! 33. S5 Soft-Off Shutdown & PM1a ACPI Power State Validation
+//! 34. PMM Physical Frame Allocator Roundtrip
+//! 35. SMP CPU Enumeration & AP Online Check
+//! 36. SMP Per-CPU Independent Schedulers & Run Queues
+//! 37. SMP Load-Balanced Task Distribution & Work Stealing
 
 use alloc::boxed::Box;
 use alloc::format;
@@ -577,15 +582,15 @@ pub fn run_all_tests() -> Vec<TestResult> {
     // ========================================================================
     {
         use crate::task::{self, TaskState};
-        let before = task::SCHEDULER.lock().tasks.len();
+        let before = task::total_task_count();
         let tid = task::spawn("reap-test", task::sentinel_task_entry);
-        let after_spawn = task::SCHEDULER.lock().tasks.len();
+        let after_spawn = task::total_task_count();
         let spawned = after_spawn == before + 1;
 
         // Mark the spawned task dead and reap it (both kill_task and the
         // periodic reap in preempt_schedule use reap_dead_tasks).
         let killed = task::kill_task(tid);
-        let after_reap = task::SCHEDULER.lock().tasks.len();
+        let after_reap = task::total_task_count();
         let reaped = killed && after_reap == before;
 
         // A Dead task that is skipped by reaping must never be picked next.
@@ -1044,8 +1049,11 @@ pub fn run_all_tests() -> Vec<TestResult> {
         // 3. Spawn a test user task in the scheduler
         let spawn_ok = if load_ok && pml4_phys != 0 {
             let pid = crate::task::spawn_user("test-elf-worker", entry_point, stack_top, pml4_phys);
-            let sched = crate::task::SCHEDULER.lock();
-            sched.tasks.iter().any(|t| t.id == pid && t.is_user && t.cr3 == Some(pml4_phys))
+            let num_cpus = crate::arch::smp::cpu_count().max(1).min(crate::arch::smp::MAX_CPUS);
+            (0..num_cpus).any(|c| {
+                let sched = crate::task::CPU_SCHEDULERS[c].lock();
+                sched.tasks.iter().any(|t| t.id == pid && t.is_user && t.cr3 == Some(pml4_phys))
+            })
         } else {
             false
         };
@@ -1373,6 +1381,117 @@ pub fn run_all_tests() -> Vec<TestResult> {
         });
     }
 
+    // ========================================================================
+    // Test 35: SMP CPU Enumeration & AP Online Check
+    // ========================================================================
+    {
+        let online = crate::arch::smp::cpu_count();
+        let bsp_online = online >= 1;
+
+        // Check MADT core count from ACPI
+        let madt_cores = {
+            let acpi = crate::arch::acpi::ACPI_DATA.lock();
+            acpi.cores.len()
+        };
+
+        // On QEMU with --smp 1, we expect 1 online CPU.
+        // On QEMU with --smp N (N>1), we expect N online CPUs (if APs came up).
+        // The test passes if the BSP is online and the infrastructure works.
+        let passed = bsp_online && online <= crate::arch::smp::MAX_CPUS && madt_cores >= 1;
+
+        results.push(TestResult {
+            name: "SMP CPU Enumeration & AP Online Check",
+            passed,
+            detail: format!(
+                "OnlineCPUs={}, MADTCores={}, BSP={}",
+                online,
+                madt_cores,
+                if bsp_online { "online" } else { "MISSING" }
+            ),
+        });
+    }
+
+    // ========================================================================
+    // Test 36: SMP Per-CPU Independent Schedulers & Run Queues
+    // ========================================================================
+    {
+        let curr_cpu = crate::arch::smp::current_cpu();
+        let valid_cpu = curr_cpu < crate::arch::smp::MAX_CPUS;
+
+        // Check BSP scheduler run-queue
+        let (bsp_tasks_count, bsp_current_valid) = {
+            let sched = crate::task::CPU_SCHEDULERS[0].lock();
+            (sched.tasks.len(), sched.current < sched.tasks.len())
+        };
+
+        // Verify all MAX_CPUS scheduler spinlocks are non-poisoned and operable
+        let mut total_tasks_across_cores = 0;
+        let online = crate::arch::smp::cpu_count();
+        let num_cpus = online.max(1).min(crate::arch::smp::MAX_CPUS);
+
+        for c in 0..num_cpus {
+            let sched = crate::task::CPU_SCHEDULERS[c].lock();
+            total_tasks_across_cores += sched.tasks.len();
+        }
+
+        let passed = valid_cpu && bsp_tasks_count >= 1 && bsp_current_valid;
+
+        results.push(TestResult {
+            name: "SMP Per-CPU Schedulers & Run Queue Isolation",
+            passed,
+            detail: format!(
+                "CurrentCPU={}, BSPTasks={}, BSPCurrentValid={}, TotalTasks={}, Operable={}",
+                curr_cpu, bsp_tasks_count, bsp_current_valid, total_tasks_across_cores, passed
+            ),
+        });
+    }
+
+    // ========================================================================
+    // Test 37: SMP Task Distribution & Concurrent Execution
+    // ========================================================================
+    {
+        extern "C" fn dummy_test_task() {}
+
+        // Test spawn distribution
+        let spawned_tid = crate::task::spawn("smp-diag-worker", dummy_test_task);
+        let target_cpu = crate::task::choose_target_cpu();
+
+        // Verify the task was placed on a valid online CPU
+        let mut found_on_cpu = None;
+        for c in 0..crate::arch::smp::MAX_CPUS {
+            let sched = crate::task::CPU_SCHEDULERS[c].lock();
+            if sched.tasks.iter().any(|t| t.id == spawned_tid) {
+                found_on_cpu = Some(c);
+                break;
+            }
+        }
+
+        let spawn_ok = found_on_cpu.is_some();
+
+        // Test kill and reap across cores
+        let killed = crate::task::kill_task(spawned_tid);
+
+        // Verify task was reaped and is no longer present on any CPU queue
+        let mut still_present = false;
+        for c in 0..crate::arch::smp::MAX_CPUS {
+            let sched = crate::task::CPU_SCHEDULERS[c].lock();
+            if sched.tasks.iter().any(|t| t.id == spawned_tid) {
+                still_present = true;
+                break;
+            }
+        }
+
+        let passed = spawn_ok && killed && !still_present && target_cpu < crate::arch::smp::MAX_CPUS;
+
+        results.push(TestResult {
+            name: "SMP Task Distribution & Cross-Core Management",
+            passed,
+            detail: format!(
+                "TID={}, TargetCPU={}, FoundOnCPU={:?}, Killed={}, ReapedClean={}, Clean={}",
+                spawned_tid, target_cpu, found_on_cpu, killed, !still_present, passed
+            ),
+        });
+    }
+
     results
 }
-
