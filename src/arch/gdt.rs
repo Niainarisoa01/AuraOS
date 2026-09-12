@@ -89,15 +89,16 @@ impl Tss64 {
     }
 }
 
+/// 16-byte aligned stack buffer used for IST stacks and kernel (RSP0) stacks.
 #[repr(align(16))]
-struct AlignedStack<const N: usize>([u8; N]);
+pub(crate) struct AlignedStack<const N: usize>([u8; N]);
 
 /// IST1 stack for Double Fault handler (8 KiB, 16-byte aligned)
-const IST1_STACK_SIZE: usize = 8 * 1024;
+pub(crate) const IST1_STACK_SIZE: usize = 8 * 1024;
 static IST1_STACK: SyncUnsafeCell<AlignedStack<IST1_STACK_SIZE>> = SyncUnsafeCell::new(AlignedStack([0u8; IST1_STACK_SIZE]));
 
 /// Kernel Ring 0 stack for transitions from Ring 3 (16 KiB, 16-byte aligned)
-const KERNEL_STACK_SIZE: usize = 16 * 1024;
+pub(crate) const KERNEL_STACK_SIZE: usize = 16 * 1024;
 static KERNEL_STACK: SyncUnsafeCell<AlignedStack<KERNEL_STACK_SIZE>> = SyncUnsafeCell::new(AlignedStack([0u8; KERNEL_STACK_SIZE]));
 
 /// Global TSS instance
