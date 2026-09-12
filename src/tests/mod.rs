@@ -581,7 +581,7 @@ pub fn run_all_tests() -> Vec<TestResult> {
     // Test 17: Dead Task Auto-Reaping (frees zombie stacks)
     // ========================================================================
     {
-        use crate::task::{self, TaskState};
+        use crate::task;
         let before = task::total_task_count();
         let tid = task::spawn("reap-test", task::sentinel_task_entry);
         let after_spawn = task::total_task_count();
@@ -596,7 +596,7 @@ pub fn run_all_tests() -> Vec<TestResult> {
         // A Dead task that is skipped by reaping must never be picked next.
         let _dead_skipped = {
             let sched = task::SCHEDULER.lock();
-            TaskState::Dead == TaskState::Dead && sched.pick_next().is_some()
+            sched.pick_next().is_some()
         };
 
         let passed = spawned && reaped;
@@ -1049,7 +1049,7 @@ pub fn run_all_tests() -> Vec<TestResult> {
         // 3. Spawn a test user task in the scheduler
         let spawn_ok = if load_ok && pml4_phys != 0 {
             let pid = crate::task::spawn_user("test-elf-worker", entry_point, stack_top, pml4_phys);
-            let num_cpus = crate::arch::smp::cpu_count().max(1).min(crate::arch::smp::MAX_CPUS);
+            let num_cpus = crate::arch::smp::cpu_count().clamp(1, crate::arch::smp::MAX_CPUS);
             (0..num_cpus).any(|c| {
                 let sched = crate::task::CPU_SCHEDULERS[c].lock();
                 sched.tasks.iter().any(|t| t.id == pid && t.is_user && t.cr3 == Some(pml4_phys))
@@ -1427,7 +1427,7 @@ pub fn run_all_tests() -> Vec<TestResult> {
         // Verify all MAX_CPUS scheduler spinlocks are non-poisoned and operable
         let mut total_tasks_across_cores = 0;
         let online = crate::arch::smp::cpu_count();
-        let num_cpus = online.max(1).min(crate::arch::smp::MAX_CPUS);
+        let num_cpus = online.clamp(1, crate::arch::smp::MAX_CPUS);
 
         for c in 0..num_cpus {
             let sched = crate::task::CPU_SCHEDULERS[c].lock();

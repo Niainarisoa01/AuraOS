@@ -885,7 +885,7 @@ pub fn preempt_schedule_on_cpu(cpu_id: usize) -> bool {
 /// Returns the total number of tasks currently allocated across all online CPUs.
 pub fn total_task_count() -> usize {
     let online = crate::arch::smp::cpu_count();
-    let num_cpus = online.max(1).min(crate::arch::smp::MAX_CPUS);
+    let num_cpus = online.clamp(1, crate::arch::smp::MAX_CPUS);
     let mut total = 0;
     for c in 0..num_cpus {
         total += CPU_SCHEDULERS[c].lock().tasks.len();

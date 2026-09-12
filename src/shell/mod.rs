@@ -291,18 +291,22 @@ impl Shell {
 
             "tasks" | "ps" => {
                 let online = crate::arch::smp::cpu_count();
-                let num_cpus = online.max(1).min(crate::arch::smp::MAX_CPUS);
+                let num_cpus = online.clamp(1, crate::arch::smp::MAX_CPUS);
                 let count = crate::task::SENTINEL_HEARTBEATS.load(core::sync::atomic::Ordering::SeqCst);
                 crate::println!("--- AURAOS KERNEL TASK SCHEDULER (SMP: {} CPU(s) online) ---", online);
                 crate::println!("CPU  PID  NAME               RING   STATE           PRIO QUANTUM    TICKS      RSP");
                 for cpu_id in 0..num_cpus {
                     let sched = crate::task::CPU_SCHEDULERS[cpu_id].lock();
                     for task in &sched.tasks {
+                        let state_buf;
                         let state_str = match task.state {
-                            crate::task::TaskState::Ready => alloc::format!("READY"),
-                            crate::task::TaskState::Running => alloc::format!("RUNNING"),
-                            crate::task::TaskState::Sleeping(w) => alloc::format!("SLEEP({})", w),
-                            crate::task::TaskState::Dead => alloc::format!("DEAD"),
+                            crate::task::TaskState::Ready => "READY",
+                            crate::task::TaskState::Running => "RUNNING",
+                            crate::task::TaskState::Sleeping(w) => {
+                                state_buf = alloc::format!("SLEEP({})", w);
+                                &state_buf
+                            }
+                            crate::task::TaskState::Dead => "DEAD",
                         };
                         let ring_str = if task.is_user { "RING 3" } else { "RING 0" };
                         crate::println!("{:<4} {:<4} {:<18} {:<6} {:<15} {:<4} {}/{:<6} {:<10} {:#x}",
