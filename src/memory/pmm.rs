@@ -141,33 +141,33 @@ static PMM: Spinlock<Pmm> = Spinlock::new(Pmm::new());
 /// Initialized flag (also doubles as "PMM ready" for stats consumers).
 static PMM_READY: AtomicUsize = AtomicUsize::new(0);
 
-/// Initializes the physical memory manager from the bootloader's E820 memory map.
+/// Initializes the physical memory manager from a unified memory map.
 ///
-/// Called very early during boot (step 0b of `_start`), before the kernel heap
+/// Called very early during boot (step 0b of `kernel_main`), before the kernel heap
 /// is set up. Only writable kernel-statics are touched here, so no dependency
 /// on the identity-mapped RAM window exists yet.
-pub fn init(boot_info: &bootloader::bootinfo::BootInfo) {
+pub fn init(memory_map: &[crate::boot::MemoryRegion]) {
     let mut pmm = PMM.lock();
 
     let mut total = 0u64;
     let mut max_addr = 0u64;
     let mut count = 0usize;
 
-    for region in boot_info.memory_map.iter() {
-        let start = region.range.start_addr();
-        let end = region.range.end_addr();
+    for region in memory_map.iter() {
+        let start = region.start;
+        let end = region.end;
         if count < MAX_REGIONS {
             pmm.regions[count] = PmmRegion {
                 start,
                 end,
-                usable: region.region_type == bootloader::bootinfo::MemoryRegionType::Usable,
+                usable: region.is_usable(),
             };
             count += 1;
         }
         if end > max_addr {
             max_addr = end;
         }
-        if region.region_type == bootloader::bootinfo::MemoryRegionType::Usable {
+        if region.is_usable() {
             total += end - start;
         }
     }

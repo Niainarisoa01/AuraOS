@@ -12,6 +12,7 @@ mod sync;
 mod klog;
 
 // Subsystem architecture layers
+pub mod boot;
 mod arch;
 mod drivers;
 mod memory;
@@ -27,21 +28,36 @@ use alloc::format;
 use alloc::vec::Vec;
 use core::panic::PanicInfo;
 
-/// Entry point of the AuraOS kernel.
-/// Called by the bootloader in 64-bit Long Mode, which passes the boot
-/// information (including the E820 memory map) in RDI.
+/// Entry point of the AuraOS kernel when invoked by the bootloader in 64-bit Long Mode.
+/// Automatically detects whether called with a unified `BootInfo` (UEFI) or `bootloader::bootinfo::BootInfo` (BIOS).
 #[unsafe(no_mangle)]
-pub extern "C" fn _start(boot_info: &'static bootloader::bootinfo::BootInfo) -> ! {
+pub extern "C" fn _start(raw_boot_info: *const u8) -> ! {
+    let magic = unsafe { *(raw_boot_info as *const u64) };
+    if magic == boot::BOOT_INFO_MAGIC {
+        let boot_info = unsafe { &*(raw_boot_info as *const boot::BootInfo) };
+        kernel_main(boot_info);
+    } else {
+        let bios_boot_info = unsafe { &*(raw_boot_info as *const bootloader::bootinfo::BootInfo) };
+        let boot_info = boot::bios::convert_bios_boot_info(bios_boot_info);
+        kernel_main(boot_info);
+    }
+}
+
+/// Unified entry point of the AuraOS kernel, invoked identically by BIOS and UEFI paths.
+#[unsafe(no_mangle)]
+pub extern "C" fn kernel_main(boot_info: &'static boot::BootInfo) -> ! {
+    // Record the active boot parameters in kernel storage
+    boot::set_active_boot_info(*boot_info);
+
     // Step 0: Initialize COM1 serial port for immediate debug logging
     drivers::serial::init();
     serial_println!("============================================================");
     serial_println!("        AuraOS Kernel v0.1.0 - Booting Up...                ");
     serial_println!("============================================================");
 
-    // Step 0b: Initialize the Physical Memory Manager from the E820 memory map.
-    // This must happen as early as possible so the bootloader-provided BootInfo
-    // is captured into kernel-owned storage before anything could clobber it.
-    memory::pmm::init(boot_info);
+    // Step 0b: Initialize the Physical Memory Manager from the unified memory map.
+    // This must happen as early as possible so physical frames are known.
+    memory::pmm::init(boot_info.memory_map);
 
     // ==========================================
     // AuraOS Kernel Boot Phase
@@ -113,7 +129,7 @@ pub extern "C" fn _start(boot_info: &'static bootloader::bootinfo::BootInfo) -> 
 
     // Step 7b: Initialize ACPI Subsystem & Local APIC
     memory::paging::init_hardware_mappings();
-    arch::acpi::init();
+    arch::acpi::init_with_rsdp(boot_info.acpi_rsdp);
     arch::apic::init();
 
     // Step 7c: Initialize Kernel Multitasking & Scheduler (BSP run-queue and TCBs)
@@ -210,9 +226,18 @@ pub extern "C" fn _start(boot_info: &'static bootloader::bootinfo::BootInfo) -> 
     // Step 12: System status report
     println!();
     println!("[OK] Mode      : x86_64 Bare-Metal Long Mode (64-bit)");
+    println!("[OK] Boot Mode : {} (Unified BootInfo)", match boot_info.boot_method {
+        boot::BootMethod::Bios => "BIOS / Legacy",
+        boot::BootMethod::Uefi => "Native UEFI",
+    });
     println!("[OK] Memory    : 8 MiB Heap, 4 KiB Paging abstractions");
-    println!("[OK] RAM       : Physical RAM {} MiB detected (E820), {} MiB free frames via PMM",
+    let map_source = match boot_info.boot_method {
+        boot::BootMethod::Bios => "E820",
+        boot::BootMethod::Uefi => "UEFI",
+    };
+    println!("[OK] RAM       : Physical RAM {} MiB detected ({}), {} MiB free frames via PMM",
         memory::pmm::total_memory() / (1024 * 1024),
+        map_source,
         memory::pmm::free_memory() / (1024 * 1024));
     println!("[OK] Filesystem: Virtual Inode VFS mounted at '/'");
     println!("[OK] Storage   : ATA / IDE PIO 28-bit driver active");

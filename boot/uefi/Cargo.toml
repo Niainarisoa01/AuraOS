@@ -1,0 +1,13 @@
+[package]
+name = "aura-uefi-bootloader"
+version = "0.1.0"
+edition = "2024"
+
+[[bin]]
+name = "bootx64"
+path = "src/main.rs"
+test = false
+bench = false
+
+[dependencies]
+# Zéro dépendance externe — Types et ABI UEFI rédigés à la main en Rust no_std.

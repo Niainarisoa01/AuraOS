@@ -56,6 +56,8 @@ pub const SYS_MMAP: u64 = 9;
 #[allow(dead_code)]
 pub const SYS_MUNMAP: u64 = 11;
 #[allow(dead_code)]
+pub const SYS_BRK: u64 = 12;
+#[allow(dead_code)]
 pub const SYS_YIELD: u64 = 24;
 #[allow(dead_code)]
 pub const SYS_SLEEP: u64 = 35;
@@ -263,6 +265,20 @@ extern "C" fn syscall_dispatch(
                         Ok(()) => 0,
                         Err(_) => u64::MAX, // -1 (EINVAL)
                     }
+                } else {
+                    u64::MAX
+                }
+            } else {
+                u64::MAX
+            }
+        }
+        SYS_BRK => {
+            let new_brk = arg1;
+            let mut sched = crate::task::CPU_SCHEDULERS[cpu_id].lock();
+            let curr = sched.current;
+            if curr < sched.tasks.len() {
+                if let Some(ref mut space) = sched.tasks[curr].address_space {
+                    space.brk(new_brk)
                 } else {
                     u64::MAX
                 }

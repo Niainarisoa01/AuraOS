@@ -570,6 +570,22 @@ pub fn is_current_guard_page(fault_addr: u64) -> bool {
     false
 }
 
+/// Invokes heap break adjustment (brk) for the currently running task on the active CPU core.
+#[allow(dead_code)]
+pub fn current_task_brk(new_brk: u64) -> u64 {
+    let cpu_id = crate::arch::smp::current_cpu();
+    let cpu_id = if cpu_id < crate::arch::smp::MAX_CPUS { cpu_id } else { 0 };
+
+    let mut sched = CPU_SCHEDULERS[cpu_id].lock();
+    let curr = sched.current;
+    if curr < sched.tasks.len() {
+        if let Some(ref mut space) = sched.tasks[curr].address_space {
+            return space.brk(new_brk);
+        }
+    }
+    u64::MAX
+}
+
 
 /// Attempts to steal a ready task from another CPU.
 /// To avoid deadlocks, locks are acquired one at a time and never held nested.

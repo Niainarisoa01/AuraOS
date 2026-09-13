@@ -165,7 +165,7 @@ extern "x86-interrupt" fn page_fault_handler(frame: InterruptStackFrame, error_c
 
     let is_present = (error_code & 1) != 0;
     let is_write = (error_code & 2) != 0;
-    let is_user = (error_code & 4) != 0;
+    let is_user = (error_code & 4) != 0 || (frame.code_segment & 3) == 3;
 
     // 1. Demand Paging resolution:
     // If the page was NOT present, attempt lazy page fault resolution on the active address space

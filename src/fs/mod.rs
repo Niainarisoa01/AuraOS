@@ -635,6 +635,26 @@ fn proc_meminfo_generator() -> Vec<u8> {
     let phys_free_mb = crate::memory::pmm::free_memory() / (1024 * 1024);
     let phys_used_mb = crate::memory::pmm::used_memory().div_ceil(1024 * 1024);
 
+    let (user_tasks, total_vm_kb, total_populated_kb) = {
+        let mut tasks_cnt = 0;
+        let mut vm_bytes = 0;
+        let mut pop_bytes = 0;
+        let online = crate::arch::smp::cpu_count().clamp(1, crate::arch::smp::MAX_CPUS);
+        for c in 0..online {
+            let sched = crate::task::CPU_SCHEDULERS[c].lock();
+            for t in &sched.tasks {
+                if t.is_user {
+                    tasks_cnt += 1;
+                    if let Some(ref sp) = t.address_space {
+                        vm_bytes += sp.virtual_memory_size();
+                        pop_bytes += sp.populated_memory_size();
+                    }
+                }
+            }
+        }
+        (tasks_cnt, vm_bytes / 1024, pop_bytes / 1024)
+    };
+
     alloc::format!(
         "MemTotal:        {} kB\n\
          MemFree:         {} kB\n\
@@ -643,10 +663,14 @@ fn proc_meminfo_generator() -> Vec<u8> {
          PhysicalTotal:   {} MiB (E820 memory map)\n\
          PhysicalFree:    {} MiB\n\
          PhysicalUsed:    {} MiB\n\
+         UserTasks:       {}\n\
+         UserVmTotal:     {} kB\n\
+         UserVmPopulated: {} kB\n\
          PMMRange:        2 MiB .. 512 MiB (identity-mapped frames)\n\
          PagingModel:     4-Level x86_64 Long Mode (PML4)\n",
         total_kb, free_kb, used_kb, total_kb, total_kb / 1024,
         phys_total_mb, phys_free_mb, phys_used_mb,
+        user_tasks, total_vm_kb, total_populated_kb,
     ).into_bytes()
 }
 

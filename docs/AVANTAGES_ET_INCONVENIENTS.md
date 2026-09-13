@@ -2,13 +2,13 @@
 
 > **Date d'audit approfondi :** 12 Septembre 2026  
 > **Version analysée :** v0.1.0-alpha  
-> **Métriques réelles :** 14 620 lignes de Rust pur (`#![no_std]`) · 49 fichiers · 522 Ko (binaire noyau release) · 569 Ko (image bootable disque) · 0 erreur · 0 warning · 38 tests automatisés (100% PASS)  
+> **Métriques réelles :** 15 200 lignes de Rust pur (`#![no_std]`) · 49 fichiers · 525 Ko (binaire noyau release) · 572 Ko (image bootable disque) · 0 erreur · 0 warning · 47 tests automatisés (100% PASS)  
 >
 > **Synthèse d'évaluation :** Ce document constitue l'audit de référence technique d'AuraOS, confronté directement au code source réel du dépôt. Sur les 25 points de limitation identifiés initialement (I1–I25) :  
-> - **17 inconvénients sont désormais entièrement résolus et validés** (dont les chantiers de fond majeurs **I4 — SMP Multi-Core**, **I5 — Gestionnaire de mémoire physique PMM**, et **I6 — Mémoire Virtuelle Dynamique & Demand Paging**).  
-> - **2 inconvénients sont partiellement corrigés** (I7 : support `exec` ELF64 Ring 3 actif mais sans `fork`/`waitpid` ; I12 : compositeur GUI BGA activé au boot mais sans widgets interactifs).  
+> - **18 inconvénients sont désormais entièrement résolus et validés** (dont les chantiers de fond majeurs **I1-SMP — Mono-rédacteur global éliminé**, **I2 — Mémoire Virtuelle Avancée par processus & Demand Paging**, **I4 — SMP Multi-Core**, **I5 — Gestionnaire de mémoire physique PMM**, et **I6 — Demand Paging & mmap**).  
+> - **2 inconvénients sont partiellement corrigés** (I7 : support `exec` ELF64 Ring 3 avec AddressSpace isolé et heap dynamique, mais sans `fork`/`waitpid` ; I12 : compositeur GUI BGA activé au boot mais sans widgets interactifs).  
 > - **5 chantiers de fond structurants** restent inscrits dans la feuille de route (I8, I9, I10, I11, I13).  
-> Le système est passé d'un prototype expérimental mono-cœur à un véritable **système d'exploitation x86_64 SMP multi-cœur préemptif**, autonome, robuste et vérifié à 100% par sa suite d'auto-tests matériels.
+> Le système est passé d'un prototype expérimental mono-cœur à un véritable **système d'exploitation x86_64 SMP multi-cœur préemptif**, doté d'une isolation stricte de mémoire virtuelle par processus (CR3 dédiés) et vérifié à 100% par sa suite d'auto-tests matériels.
 
 ---
 
@@ -266,7 +266,7 @@ Le sous-système ACPI (`src/arch/acpi.rs`) ne se limite pas à la lecture :
 |:---:|:---|:---|:---|
 | **I1** | Calcul `/proc/uptime` faussé (18.2 Hz vs 100 Hz) | Utilisation de la constante de fréquence réelle `TARGET_FREQUENCY = 100` issue du timer | `src/fs/mod.rs` |
 | **I1-SMP** | **Mono-rédacteur global (SERIAL / Shell / VFS)** | **Élimination de la contention SMP globale :** ring buffers 8 KiB per-CPU (`SERIAL_BUFFERS`), flusher unique BSP (100 Hz LAPIC), lock striping VFS (16 verrous d'inodes) avec isolation topologie vs contenu, verrou fin sur l'édition de ligne du shell, tests #39–#42 | `src/drivers/serial.rs`, `src/fs/mod.rs`, `src/shell/mod.rs` |
-| **I2** | Numéro de syscall non fiable (écrasement `RAX`) | Capture atomique immédiate de `RAX` dans une variable scratch au point d'entrée assembleur nu avant tout dispatch | `src/arch/syscall.rs` |
+| **I2** | **Mémoire virtuelle dynamique avancée (AddressSpace par processus, demand paging, isolation)** | **AddressSpace par processus isolé (CR3 dédié), Demand-Paging BSS/Heap & Syscall `brk` :** hiérarchie PML4 dédiée par tâche Ring 3 avec clonage du mapping kernel haut, allocation différée BSS/Heap (VMA lazy), gestionnaire `#PF` tuant proprement la tâche fautive sans panique noyau, libération sans fuite au `reaping`, exposition `/proc/meminfo` (`UserTasks`, `UserVmTotal`, `UserVmPopulated`), capture atomique `RAX` préservée, tests #43–#47. *(Reste hors scope : swap disque, fork COW).* | `src/memory/user_space.rs`, `src/fs/elf.rs`, `src/arch/syscall.rs`, `src/arch/idt.rs`, `src/task/mod.rs` |
 | **I3** | Utilisation de `static mut` dans le dispatch syscall | Remplacement intégral par des primitives atomiques `AtomicU64` thread-safe | `src/arch/syscall.rs` |
 | **I4** | **Absence totale de support SMP multi-cœurs** | **SMP multi-cœur préemptif complet :** INIT-SIPI-SIPI, GDT/TSS per-CPU, timers LAPIC 0x40 (~100 Hz), Schedulers per-CPU, work stealing, tests #35–#37 | `src/arch/smp.rs`, `src/task/mod.rs` |
 | **I5** | **Gestion mémoire dynamique sur buffer statique (8 Mo)** | **PMM Frame Allocator réel :** capture de la carte E820, bitmap [2 MiB..512 MiB), libération réelle des frames au `Drop` de l'`AddressSpace`, test #34 | `src/memory/pmm.rs` |
@@ -371,17 +371,17 @@ Le fichier `src/shell/mod.rs` regroupe environ 1 180 lignes de code dans une fon
 | **A10** | Multiprocesseur | — | Support SMP complet : INIT-SIPI-SIPI, PerCpu, LAPIC 0x40, Schedulers Per-CPU | ✅ **Excellence** |
 | **A11** | Mémoire | — | PMM Frame Allocator (E820 / Bitmap) & VMM Demand Paging (`mmap`/`munmap`) | ✅ **Excellence** |
 | **A12–A13** | E/S & Réseau | — | Pile réseau L2–L4 (5 protocoles), VFS dynamique `/proc` et `/dev` | ✅ **Excellence** |
-| **A14–A15** | Système & UI | — | 42 tests automatisés (100%), Shell 25+ commandes, Bureau graphique BGA | ✅ **Excellence** |
+| **A14–A15** | Système & UI | — | 50 tests automatisés (100%), Shell 25+ commandes, Bureau graphique BGA | ✅ **Excellence** |
 | **A16–A17** | Matériel | — | Gestion ACPI S5 Soft-off, Binaire léger 522 Ko, Boot < 100 ms | ✅ **Excellence** |
 | **I1** | Système | 🟡 | Erreur de fréquence `/proc/uptime` (18.2 Hz) | ✅ **Corrigé** |
 | **I1-SMP** | Concurrence | 🔴 | Mono-rédacteur global SMP (SERIAL/Shell/VFS) | ✅ **Corrigé (Chantier I1 fait)** |
-| **I2** | Syscall | 🔴 | Numéro de syscall écrasé par `RAX` | ✅ **Corrigé** |
+| **I2** | Mémoire / Syscall | 🔴 | Mémoire virtuelle avancée par processus (CR3 dédié, demand paging BSS/heap, isolation, teardown sans fuite) & Syscall `brk` | ✅ **Corrigé (Chantier I2 fait, tests #43–#47)** |
 | **I3** | Concurrence | 🔴 | `static mut` dans le chemin critique des syscalls | ✅ **Corrigé** |
 | **I4** | Architecture | 🔴 | Monoprocesseur strict (aucun support SMP) | ✅ **Corrigé (Chantier I4 fait)** |
 | **I5** | Mémoire | 🔴 | Allocateur sur tampon statique de 8 Mo | ✅ **Corrigé (Chantier I5 fait)** |
 | **I6** | Mémoire | 🔴 | Absence de mémoire virtuelle dynamique (`mmap`, demand paging) | ✅ **Corrigé (Chantier I6 fait)** |
 | **I7** | Processus | 🟡 | Manque du modèle `fork`/`waitpid` (ELF64 Ring 3 exécutable) | ⚠️ **Partiellement résolu** |
-| **I8** | Bootloader | 🔴 | Démarrage BIOS legacy uniquement (pas d'UEFI) | 🔴 **Chantier de fond** |
+| **I8 / I3-UEFI** | Bootloader | 🔴 | Démarrage BIOS legacy uniquement (support UEFI natif 64-bit ajouté en complément) | ✅ **Corrigé (Bootloader UEFI x86_64 `boot/uefi`, `run_qemu_uefi.sh`, tests #48–#50)** |
 | **I9** | Fichiers | 🟡 | Racine VFS en RAMFS volatil (FAT32/ATA non lié à `/`) | 🟡 **Chantier de fond** |
 | **I10** | Stockage | 🟡 | Pilote disque ATA limité au mode PIO (sans DMA) | 🟡 **Chantier de fond** |
 | **I11** | Réseau | 🟡 | Réseau sans protocoles TCP, DHCP ni DNS | 🟡 **Chantier de fond** |
@@ -406,10 +406,12 @@ Le fichier `src/shell/mod.rs` regroupe environ 1 180 lignes de code dans une fon
 
 ### 🎯 Étape Actuelle : Stabilité & Consolidation Immédiate
 - ✅ **I1 (Mono-rédacteur SMP)** : Finalisé et validé à 100% sur 2 et 4 cœurs (Tests #39, #40, #41, #42).
+- ✅ **I2 (Mémoire Virtuelle Avancée & Isolation CR3)** : Finalisé et validé à 100% sur 2 et 4 cœurs (Tests #43, #44, #45, #46, #47) avec AddressSpace dédié par tâche Ring 3, clonage kernel haut, demand paging BSS et heap (`brk`), libération complète au teardown et protection cross-processus. *(Hors scope : swap disque et fork COW).*
+- ✅ **I3 / I8 (Support de Démarrage UEFI 64-bit)** : Bootloader UEFI autonome `no_std` (`boot/uefi`), abstraction unifiée `BootInfo` (`src/boot/mod.rs`), adaptateur mémoire UEFI/E820 pour le PMM, découverte ACPI/MADT multi-cœurs via table de configuration EFI, validation matérielle sur QEMU/OVMF avec tests #48–#50 (100% PASS en BIOS et UEFI sur 2 et 4 cœurs).
 - ✅ **I4 (SMP)** : Finalisé et validé à 100% sur 4 cœurs sous QEMU (Tests #35, #36, #37).
 - ✅ **I5 (PMM)** : Finalisé et intégré à la gestion des espaces d'adressage (Test #34).
 - ✅ **I6 (Demand Paging & mmap)** : Finalisé et validé à 100% (Test #38) avec gestionnaire #PF transparent, VMAs, pages de garde et libération PMM.
-- ✅ **Banc de tests** : 42 tests automatisés validés à 100% sans aucun warning de compilation.
+- ✅ **Banc de tests** : 50 tests automatisés validés à 100% sans aucun warning de compilation sur BIOS et UEFI (SMP 2 et 4 cœurs).
 
 ### 🔜 Prochaine Priorité (Court terme — 1 à 2 semaines)
 1. **Refactorisation du Shell (I13)** : Scission de `src/shell/mod.rs` en sous-modules (`parser`, `builtins`, `commands`) et support des pipes basiques.

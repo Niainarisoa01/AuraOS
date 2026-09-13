@@ -396,17 +396,61 @@ fn parse_fadt(fadt_addr: u64, info: &mut AcpiInfo) {
     }
 }
 
-/// Initializes the ACPI subsystem: locates RSDP, iterates RSDT/XSDT,
-/// and populates FADT, MADT, and CPU core info.
-pub fn init() -> bool {
+/// Validates and parses an RSDP descriptor at a specific physical address.
+pub fn parse_rsdp_at(addr: u64) -> Option<(u64, RsdpDescriptorV1, Option<RsdpDescriptorV2>)> {
+    if addr == 0 {
+        return None;
+    }
+    let sig = unsafe { core::ptr::read_volatile(addr as *const [u8; 8]) };
+    if &sig != b"RSD PTR " {
+        return None;
+    }
+    let v1_bytes = unsafe { core::slice::from_raw_parts(addr as *const u8, 20) };
+    if !validate_checksum(v1_bytes) {
+        return None;
+    }
+    let v1 = unsafe { core::ptr::read_unaligned(addr as *const RsdpDescriptorV1) };
+    let v2 = if v1.revision >= 2 {
+        let v2_raw = unsafe { core::ptr::read_unaligned(addr as *const RsdpDescriptorV2) };
+        let total_len = (v2_raw.length as usize).min(1024);
+        if total_len >= 36 {
+            let v2_bytes = unsafe { core::slice::from_raw_parts(addr as *const u8, total_len) };
+            if validate_checksum(v2_bytes) {
+                Some(v2_raw)
+            } else {
+                None
+            }
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+    Some((addr, v1, v2))
+}
+
+/// Initializes the ACPI subsystem with an optional RSDP pointer override.
+///
+/// If `rsdp_override` is `Some(addr)`, the function validates and parses the RSDP
+/// directly at that physical address (e.g. obtained via EFI Configuration Table).
+/// If `None` or invalid, it falls back to scanning physical memory (EBDA / BIOS ROM).
+pub fn init_with_rsdp(rsdp_override: Option<u64>) -> bool {
     let mut info = ACPI_DATA.lock();
 
-    let (rsdp_addr, rsdp_v1, rsdp_v2) = match find_rsdp() {
-        Some(res) => res,
-        None => {
-            crate::serial_println!("[ACPI] Warning: RSDP structure not found in EBDA or BIOS ROM.");
+    let (rsdp_addr, rsdp_v1, rsdp_v2) = if let Some(addr) = rsdp_override {
+        if let Some(res) = parse_rsdp_at(addr) {
+            res
+        } else if let Some(res) = find_rsdp() {
+            res
+        } else {
+            crate::serial_println!("[ACPI] Warning: Provided RSDP at {:#x} invalid and scan failed.", addr);
             return false;
         }
+    } else if let Some(res) = find_rsdp() {
+        res
+    } else {
+        crate::serial_println!("[ACPI] Warning: RSDP structure not found in EBDA or BIOS ROM.");
+        return false;
     };
 
     info.rsdp_addr = rsdp_addr;
@@ -499,4 +543,9 @@ pub fn init() -> bool {
     );
 
     true
+}
+
+/// Initializes the ACPI subsystem using automatic physical memory scanning (BIOS fallback).
+pub fn init() -> bool {
+    init_with_rsdp(None)
 }

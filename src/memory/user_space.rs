@@ -90,6 +90,9 @@ pub fn debug_dump_walk(cr3: u64, virt: u64) {
     crate::serial_println!("[WALK] PT[{}]={:#x}", p1_idx, p1e.0);
 }
 
+/// Default virtual memory base for dynamic user heap allocation (1.25 GiB).
+pub const DEFAULT_USER_HEAP_START: u64 = 0x0000_0000_5000_0000;
+
 /// Represents an isolated virtual memory address space for a user process.
 #[allow(dead_code)]
 pub struct AddressSpace {
@@ -104,6 +107,10 @@ pub struct AddressSpace {
     vmas: Vec<VmArea>,
     /// Next address hint for anonymous mmap allocations
     mmap_bump_ptr: u64,
+    /// Starting virtual address for the process's heap
+    pub heap_start: u64,
+    /// Current break point for the process's heap
+    pub heap_end: u64,
 }
 
 unsafe impl Send for AddressSpace {}
@@ -111,18 +118,16 @@ unsafe impl Sync for AddressSpace {}
 
 #[allow(dead_code)]
 impl AddressSpace {
-    /// Creates a new isolated address space with kernel mappings preserved.
-    pub fn new() -> Option<Self> {
+    /// Clones the kernel mapping into a newly allocated PML4 table.
+    /// Preserves all upper supervisor entries and establishes an isolated
+    /// PDPT for PML4[0] to prevent user mappings from mutating the kernel's tables.
+    unsafe fn clone_kernel_mapping(
+        pml4_virt: *mut PageTable,
+        allocated_frames: &mut Vec<u64>,
+    ) -> Option<()> {
         let kcr3 = KERNEL_CR3.load(Ordering::Relaxed);
         let kernel_cr3 = if kcr3 != 0 { PhysAddr(kcr3) } else { read_cr3() };
         let kernel_pml4 = kernel_cr3.as_u64() as *const PageTable;
-
-        let pml4 = unsafe { alloc_page_table()? };
-        let mut allocated_frames = Vec::new();
-        allocated_frames.push(pml4.phys.as_u64());
-
-        let pml4_virt = pml4.virt;
-        let pml4_phys = pml4.phys;
 
         unsafe {
             // Step 1: Copy ALL kernel PML4 entries to preserve kernel mappings
@@ -150,13 +155,22 @@ impl AddressSpace {
                     user_pdpt.phys,
                     page_flags::PRESENT | page_flags::WRITABLE | page_flags::USER_ACCESSIBLE,
                 );
-
-                crate::serial_println!(
-                    "[UserSpace] PML4 virt={:#x} phys={:#x}, PDPT virt={:#x} phys={:#x}",
-                    pml4_virt as u64, pml4_phys.as_u64(),
-                    user_pdpt.virt as u64, user_pdpt.phys.as_u64()
-                );
             }
+        }
+        Some(())
+    }
+
+    /// Creates a new isolated address space with kernel mappings preserved.
+    pub fn new() -> Option<Self> {
+        let pml4 = unsafe { alloc_page_table()? };
+        let mut allocated_frames = Vec::new();
+        allocated_frames.push(pml4.phys.as_u64());
+
+        let pml4_virt = pml4.virt;
+        let pml4_phys = pml4.phys;
+
+        unsafe {
+            Self::clone_kernel_mapping(pml4_virt, &mut allocated_frames)?;
         }
 
         Some(AddressSpace {
@@ -165,6 +179,8 @@ impl AddressSpace {
             allocated_frames,
             vmas: Vec::new(),
             mmap_bump_ptr: MMAP_BASE_START,
+            heap_start: DEFAULT_USER_HEAP_START,
+            heap_end: DEFAULT_USER_HEAP_START,
         })
     }
 
@@ -701,6 +717,100 @@ impl AddressSpace {
     }
 
 
+    /// Dynamically expands or shrinks the process's heap (POSIX brk).
+    /// Physical frames are NOT allocated immediately; they are demand-paged
+    /// on first access (#PF).
+    pub fn brk(&mut self, new_brk: u64) -> u64 {
+        if new_brk == 0 || new_brk < self.heap_start {
+            return self.heap_end;
+        }
+
+        if new_brk == self.heap_end {
+            return self.heap_end;
+        }
+
+        // Limit heap growth to below MMAP_BASE_START (0x6000_0000)
+        if new_brk > MMAP_BASE_START {
+            return self.heap_end;
+        }
+
+        if new_brk > self.heap_end {
+            // Expansion
+            let new_aligned_end = align_up_page(new_brk);
+            let heap_start = self.heap_start;
+
+            // Check if there is already a "[heap]" VMA
+            if let Some(pos) = self.vmas.iter().position(|v| v.name == "[heap]") {
+                let current_start = self.vmas[pos].start;
+                let new_size = (new_aligned_end - current_start) as usize;
+                // Check if extending overlaps another VMA
+                let overlaps_other = self.vmas.iter().enumerate().any(|(i, v)| {
+                    i != pos && v.overlaps(current_start, new_size)
+                });
+                if overlaps_other {
+                    return self.heap_end;
+                }
+                self.vmas[pos].size = new_size;
+            } else {
+                let size = (new_aligned_end - heap_start) as usize;
+                // Check overlap with existing VMAs
+                for existing in &self.vmas {
+                    if existing.overlaps(heap_start, size) {
+                        return self.heap_end;
+                    }
+                }
+                let vma = VmArea::new(
+                    heap_start,
+                    size,
+                    PROT_READ | PROT_WRITE,
+                    MAP_PRIVATE | MAP_ANONYMOUS,
+                    false,
+                    "[heap]",
+                );
+                self.vmas.push(vma);
+            }
+
+            self.heap_end = new_brk;
+            self.heap_end
+        } else {
+            // Shrinking
+            let new_aligned_end = align_up_page(new_brk);
+            let old_aligned_end = align_up_page(self.heap_end);
+
+            if new_aligned_end < old_aligned_end {
+                let unmap_len = (old_aligned_end - new_aligned_end) as usize;
+                let _ = self.munmap(new_aligned_end, unmap_len);
+            }
+
+            if let Some(vma) = self.vmas.iter_mut().find(|v| v.name == "[heap]") {
+                vma.size = (new_aligned_end - vma.start) as usize;
+            }
+
+            self.heap_end = new_brk;
+            self.heap_end
+        }
+    }
+
+    /// Computes the total virtual memory allocated across all active VMAs (in bytes).
+    pub fn virtual_memory_size(&self) -> usize {
+        self.vmas.iter().map(|v| v.size).sum()
+    }
+
+    /// Computes the total physical memory currently populated across all VMAs (in bytes).
+    pub fn populated_memory_size(&self) -> usize {
+        self.vmas.iter().map(|v| v.populated_pages.len() * PAGE_SIZE).sum()
+    }
+
+    /// Returns the number of physical frames currently owned by this AddressSpace.
+    pub fn allocated_frame_count(&self) -> usize {
+        self.allocated_frames.len()
+    }
+
+    /// Returns the base physical address of this address space's PML4 root table.
+    pub fn cr3(&self) -> u64 {
+        self.pml4_phys.as_u64()
+    }
+
     /// Activates this address space in the CPU's CR3 control register.
     #[allow(dead_code)]
     pub unsafe fn activate(&self) {
@@ -724,8 +834,13 @@ impl AddressSpace {
 impl Drop for AddressSpace {
     fn drop(&mut self) {
         // Free every frame (page tables + user pages) back to the PMM.
+        let count = self.allocated_frames.len();
         for &addr in &self.allocated_frames {
             let _ = crate::memory::pmm::free_frame(PhysAddr(addr));
         }
+        crate::serial_println!(
+            "[AddressSpace] Teardown complete: freed {} frames back to PMM (CR3: {:#x})",
+            count, self.pml4_phys.as_u64()
+        );
     }
 }

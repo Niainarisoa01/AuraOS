@@ -259,9 +259,19 @@ pub fn load_elf(data: &[u8]) -> Result<LoadedElf, ElfError> {
 
         let writable = (phdr.p_flags & PF_W) != 0;
 
-        // Allocate and populate each page in the virtual range
+        // Eager page limit: only allocate pages that contain file data
+        let file_data_end = vaddr + file_sz as u64;
+        let eager_page_end = if file_sz > 0 {
+            ((file_data_end + PAGE_SIZE as u64 - 1) / PAGE_SIZE as u64) * PAGE_SIZE as u64
+        } else {
+            page_start
+        }.min(page_end);
+
+        let mut populated_pages = Vec::new();
+
+        // 1. Allocate and populate each page in the file-backed range
         let mut curr_page = page_start;
-        while curr_page < page_end {
+        while curr_page < eager_page_end {
             // Allocate zeroed page frame in kernel space and map into AddressSpace
             let frame_ptr = space.allocate_and_map_page(VirtAddr(curr_page), writable || true)
                 .ok_or(ElfError::SegmentMappingFailed)?;
@@ -269,7 +279,7 @@ pub fn load_elf(data: &[u8]) -> Result<LoadedElf, ElfError> {
             // Calculate overlap between this page [curr_page, curr_page + PAGE_SIZE)
             // and the segment data range [vaddr, vaddr + file_sz)
             let seg_start = vaddr;
-            let seg_end = vaddr + file_sz as u64;
+            let seg_end = file_data_end;
 
             let overlap_start = core::cmp::max(curr_page, seg_start);
             let overlap_end = core::cmp::min(curr_page + PAGE_SIZE as u64, seg_end);
@@ -288,7 +298,17 @@ pub fn load_elf(data: &[u8]) -> Result<LoadedElf, ElfError> {
                 }
             }
 
+            populated_pages.push(curr_page);
             curr_page += PAGE_SIZE as u64;
+        }
+
+        // 2. Pure BSS pages in [eager_page_end .. page_end) are NOT allocated eagerly.
+        // They will be allocated and zero-filled on demand via #PF handler.
+        if eager_page_end < page_end {
+            crate::serial_println!(
+                "[ELF Loader] Segment at {:#x}: file_sz={}B, mem_sz={}B -> {} pure BSS pages deferred to Demand Paging",
+                vaddr, file_sz, mem_sz, (page_end - eager_page_end) / PAGE_SIZE as u64
+            );
         }
 
         // Register the loaded ELF segment as a VMA
@@ -305,12 +325,10 @@ pub fn load_elf(data: &[u8]) -> Result<LoadedElf, ElfError> {
             seg_prot,
             crate::memory::vmm::MAP_PRIVATE,
             false,
-            "[elf_segment]",
+            if eager_page_end == page_start && file_sz == 0 { "[elf_bss]" } else { "[elf_segment]" },
         );
-        let mut p_addr = page_start;
-        while p_addr < page_end {
-            vma.populated_pages.insert(p_addr, 0);
-            p_addr += PAGE_SIZE as u64;
+        for p in populated_pages {
+            vma.populated_pages.insert(p, 0);
         }
         let _ = space.add_vma(vma);
 
